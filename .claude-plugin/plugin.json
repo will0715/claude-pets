@@ -1,0 +1,1 @@
+{ "name": "pets", "version": "0.1.0", "description": "Keep a cat or dog in a side pane: feed, pet, play, let it sleep", "types": "./types/index.d.ts" }
