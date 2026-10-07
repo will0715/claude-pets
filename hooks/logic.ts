@@ -293,7 +293,7 @@ const DOG_ART: Record<string, string[]> = {
   ],
 }
 
-export const ART_WIDTH = 22
+export const ART_WIDTH = 24
 export const ART_HEIGHT = 5
 
 const CAT_FACE: Record<Mood, string> = { idle: 'o.o', love: '^.^', eat: 'o.o', play: 'O.O', sleep: '-.-', sad: 'T.T' }
@@ -360,12 +360,15 @@ export function sprite(p: Pet, now: number, frame: number, right = true, resting
   // A sad pet says what it misses, between sighs.
   if (m === 'sad') lines[0] = (lines[0] ?? '').replace(/\s*$/, '') + (frame % 4 < 2 ? '  ' + need(p) : '  ...')
   if (m === 'eat') lines[4] = lines[4].padEnd(15) + (frame % 2 === 0 ? '\\_/' : '\\~/')
+  // A carried toy sits in the mouth (the snout's row), so it moves and turns with the pet.
+  const toy = m === 'play' ? TOYS[p.kind][toyOf(p)] : undefined
+  if (toy?.path === 'carry') lines[2] = (lines[2] ?? '').replace(/\s*$/, '') + toy.glyph
   lines = lines.map(l => l.padEnd(ART_WIDTH).slice(0, ART_WIDTH))
   if (!right && pose !== 'sit' && pose !== 'sleep') lines = lines.map(l => mirror(l, ART_WIDTH))
   return lines
 }
 
-type Toy = { glyph: string; note: string; path: 'bounce' | 'flick' | 'hop' }
+type Toy = { glyph: string; note: string; path: 'bounce' | 'flick' | 'hop' | 'carry' }
 
 /** Each play picks one toy; each toy moves its own way along the line under the pet. */
 export const TOYS: Record<Kind, Toy[]> = {
@@ -377,7 +380,7 @@ export const TOYS: Record<Kind, Toy[]> = {
   dog: [
     { glyph: 'o', note: '追著球跑！', path: 'bounce' },
     { glyph: '==', note: '跳起來接飛盤！', path: 'flick' },
-    { glyph: '__/', note: '叼著樹枝跑來跑去！', path: 'hop' },
+    { glyph: '--/', note: '叼著樹枝跑來跑去！', path: 'carry' },
   ],
 }
 
@@ -395,6 +398,7 @@ export function need(p: Pet): string {
 export function toyLine(p: Pet, now: number, frame: number, width: number): string {
   if (mood(p, now) !== 'play' || width < 4) return ''
   const toy = TOYS[p.kind][toyOf(p)]!
+  if (toy.path === 'carry') return ''
   const span = Math.max(1, width - toy.glyph.length)
   const along = (speed: number) => {
     const t = (frame * speed) % (span * 2)

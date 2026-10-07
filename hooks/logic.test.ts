@@ -185,7 +185,15 @@ test('each play picks one of three toys', () => {
     expect(notes.size).toBe(3)
     for (const t of [0, 1000, 2000]) {
       const p = act(adopt(emptyWorld(0), kind, 0), 'play', t).pets[0]!
-      const glyph = TOYS[kind][toyOf(p)]!.glyph
+      const toy = TOYS[kind][toyOf(p)]!
+      const glyph = toy.glyph
+      if (toy.path === 'carry') {
+        // Carried in the mouth: on the sprite, facing either way, and no line of its own.
+        expect(toyLine(p, t + 1, 0, 40)).toBe('')
+        expect(sprite(p, t + 1, 0, true)[2]).toContain(glyph)
+        for (const line of sprite(p, t + 1, 0, false)) expect(line.length).toBe(ART_WIDTH)
+        continue
+      }
       for (let f = 0; f < 10; f++) {
         const line = toyLine(p, t + 1, f, 40)
         expect(line.length).toBeLessThanOrEqual(40)
