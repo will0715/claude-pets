@@ -1,14 +1,15 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
-import type { World } from '../types'
+import type { Reaction, World } from '../types'
 import type { Walker } from './logic'
-import { act, adopt, merge, parseCommand, rename, USAGE, ART_WIDTH, bar, cycle, decay, emptyWorld, fit, newWalker, release, sprite, stepWalker, toyLine } from './logic'
+import { act, adopt, merge, parseCommand, rename, USAGE, ART_WIDTH, bar, cycle, cheer, decay, emptyWorld, fit, isTestCommand, newWalker, NO_REACTION, overlayFor, react, release, sprite, stepWalker, toyLine } from './logic'
 
 const PANE = 'pets'
 const STORE_KEY = 'world'
 const world = atom({ plugin: 'pets', key: 'world' } as const, emptyWorld(0))
 const renaming = atom({ plugin: 'pets', key: 'renaming' } as const, false)
+const reaction = atom({ plugin: 'pets', key: 'reaction' } as const, NO_REACTION)
 // Where each pet is and what it is doing; drawing only, so a reload starts it afresh.
 const walkers = new Map<string, Walker>()
 
@@ -30,6 +31,7 @@ async function petsView($: EngineInterface, e: RenderInput<'Pane'>, bodyColumns:
     const Input = 'Input' in ui ? ui.Input : undefined
     const w = await read($, world)
     const isRenaming = await read($, renaming)
+    const mood = await read($, reaction)
     const current = w.pets[w.selected]
     const now = await $.clock.now()
 
@@ -38,9 +40,10 @@ async function petsView($: EngineInterface, e: RenderInput<'Pane'>, bodyColumns:
         {w.pets.length === 0 && <Text dimColor>還沒有寵物，按 c 領養貓、d 領養狗。</Text>}
         {w.pets.map((p, i) => {
           const room = width - ART_WIDTH
-          const pos = stepWalker(walkers.get(p.id) ?? newWalker(room, w.frame, Math.random), p, now, w.frame, room, Math.random)
+          const overlay = overlayFor(mood, now, w.frame, i === w.selected)
+          const pos = stepWalker(walkers.get(p.id) ?? newWalker(room, w.frame, Math.random), p, now, w.frame, room, Math.random, overlay)
           walkers.set(p.id, pos)
-          const lines = sprite(p, now, w.frame, pos.right, pos.mode === 'rest').map(l => fit(' '.repeat(Math.round(pos.x)) + l, width).trimEnd() || ' ')
+          const lines = sprite(p, now, w.frame, pos.right, pos.mode === 'rest', overlay).map(l => fit(' '.repeat(Math.round(pos.x)) + l, width).trimEnd() || ' ')
           const toy = toyLine(p, now, w.frame, width)
           if (toy !== '') lines.push(fit(toy, width).trimEnd())
           const isSel = i === w.selected
@@ -124,4 +127,27 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => petsView($, e, e.props.bodyColumns))
+
+  // The pets watch the work: tests passing cheer them up, a failed call makes
+  // the selected one wince, and they sit and wonder while the model thinks.
+  on('tool.call', async ($, e, next) => {
+    const ran = await next(e)
+    if (ran.deny !== undefined) return ran
+    const now = await $.clock.now()
+    if (ran.isError) {
+      await update($, reaction, r => react(r, 'fail', now))
+    } else if (e.tool === 'Bash' && isTestCommand(e.command)) {
+      await update($, reaction, r => react(r, 'pass', now))
+      await change($, w => cheer(w))
+    }
+    return ran
+  })
+  on('turn.start', async ($, e, next) => {
+    await update($, reaction, r => react(r, 'think', 0))
+    return next(e)
+  })
+  on('turn.complete', async ($, e, next) => {
+    if (!e.agentId) await update($, reaction, r => react(r, 'done', 0))
+    return next(e)
+  })
 }

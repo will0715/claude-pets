@@ -21,8 +21,16 @@ export type World = {
   lastTick: number
 }
 
+/** How the pets react to the session's work; drawing only, never stored. */
+export type Reaction = {
+  kind: 'none' | 'cheer' | 'oops'
+  until: number
+  fails: number
+  thinking: boolean
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    pets: { world: World; renaming: boolean }
+    pets: { world: World; renaming: boolean; reaction: Reaction }
   }
 }

@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { act, adopt, ART_WIDTH, HUNGRY, TIRED, cycle, release, decay, emptyWorld, fit, gait, merge, mood, need, newWalker, parseCommand, rename, sprite, stepWalker, TOYS, toyLine, toyOf } from './logic'
+import { act, adopt, ART_WIDTH, HUNGRY, TIRED, cycle, release, decay, emptyWorld, cheer, fit, gait, isTestCommand, merge, mood, need, newWalker, NO_REACTION, overlayFor, parseCommand, react, rename, sprite, stepWalker, TOYS, toyLine, toyOf } from './logic'
 
 test('adopt, feed, play, sleep', () => {
   let w = adopt(emptyWorld(0), 'cat', 0)
@@ -201,4 +201,43 @@ test('each play picks one of three toys', () => {
       }
     }
   }
+})
+
+test('pets react to tests, failures and thinking', () => {
+  expect(isTestCommand('npm test')).toBe(true)
+  expect(isTestCommand('cd x && pytest -q tests/')).toBe(true)
+  expect(isTestCommand('claude plugin test .')).toBe(true)
+  expect(isTestCommand('npm run build')).toBe(false)
+  expect(isTestCommand('git log --oneline')).toBe(false)
+
+  let r = react(NO_REACTION, 'think', 0)
+  expect(overlayFor(r, 0, 0, false)).toEqual({ hold: 'still', bubble: '?' })
+  expect(overlayFor(r, 0, 2, false)?.bubble).toBe('')
+  r = react(r, 'pass', 1000)
+  expect(overlayFor(r, 2000, 0, false)).toEqual({ hold: 'spin', bubble: 'yay!' })
+  // The cheer is over after 3 s; still thinking underneath.
+  expect(overlayFor(r, 4001, 0, false)?.bubble).toBe('?')
+  r = react(r, 'done', 5000)
+  expect(overlayFor(r, 5000, 0, false)).toBeUndefined()
+  r = react(react(react(r, 'fail', 6000), 'fail', 6000), 'fail', 6000)
+  expect(overlayFor(r, 6000, 0, true)).toEqual({ hold: 'still', bubble: '...' })
+  expect(overlayFor(r, 6000, 0, false)).toBeUndefined()
+  expect(react(r, 'pass', 7000).fails).toBe(0)
+
+  const w = cheer(adopt(adopt(emptyWorld(0), 'cat', 0), 'dog', 0))
+  expect(w.pets.map(p => p.fun)).toEqual([85, 85])
+  expect(cheer(emptyWorld(0)).note).toBe(emptyWorld(0).note)
+
+  // Drawn (once the adoption hearts are over): a cheering pet spins in place
+  // with its bubble; a sleeping one is left alone.
+  const cat = w.pets[0]!
+  const t = 10_000
+  const spin = { hold: 'spin', bubble: 'yay!' } as const
+  const walker = { x: 5, right: true, mode: 'walk', left: 3, frame: 0 } as const
+  expect(stepWalker(walker, cat, t, 1, 20, () => 0.5, spin)).toMatchObject({ x: 5, right: false })
+  expect(stepWalker(walker, cat, t, 2, 20, () => 0.5, spin)).toMatchObject({ x: 5, right: true })
+  expect(sprite(cat, t, 0, true, false, spin)[0]).toContain('yay!')
+  for (const line of sprite(cat, t, 0, true, false, spin)) expect(line.length).toBe(ART_WIDTH)
+  const asleep = act({ ...w, selected: 0 }, 'sleep', t).pets[0]!
+  expect(sprite(asleep, t + 1, 0, true, false, spin).join('')).not.toContain('yay!')
 })

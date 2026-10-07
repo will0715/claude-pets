@@ -1,4 +1,4 @@
-import type { Kind, Pet, World } from '../types'
+import type { Kind, Pet, Reaction, World } from '../types'
 
 export const MAX_PETS = 4
 const CAT_NAMES = ['咪咪', '橘子', '麻糬', '布丁', '芝麻', '小花']
@@ -217,6 +217,47 @@ export function parseCommand(args: string): Step | 'open' | null {
   }
 }
 
+// --- Reactions to the session's work -------------------------------------
+
+export const NO_REACTION: Reaction = { kind: 'none', until: 0, fails: 0, thinking: false }
+
+const TEST_COMMANDS = [/(^|[\s;&|])pytest\b/, /(^|[\s;&|])npm (run )?test\b/, /(^|[\s;&|])claude plugin test\b/]
+
+export function isTestCommand(command: string): boolean {
+  return TEST_COMMANDS.some(re => re.test(command))
+}
+
+export type WorkEvent = 'pass' | 'fail' | 'think' | 'done'
+
+/** A test pass is a 3 s cheer, a failed call a 2 s oops; thinking lasts the turn. */
+export function react(r: Reaction, event: WorkEvent, now: number): Reaction {
+  switch (event) {
+    case 'pass': return { ...r, kind: 'cheer', until: now + 3000, fails: 0 }
+    case 'fail': return { ...r, kind: 'oops', until: now + 2000, fails: r.fails + 1 }
+    case 'think': return { ...r, thinking: true }
+    case 'done': return { ...r, thinking: false }
+  }
+}
+
+export type Overlay = { hold: 'spin' | 'still'; bubble: string }
+
+/** What a pet shows for the reaction now, or nothing. `selected` pets alone take the oops. */
+export function overlayFor(r: Reaction, now: number, frame: number, selected: boolean): Overlay | undefined {
+  if (r.until > now) {
+    if (r.kind === 'cheer') return { hold: 'spin', bubble: 'yay!' }
+    if (r.kind === 'oops' && selected) return { hold: 'still', bubble: r.fails >= 3 ? '...' : 'oops' }
+  }
+  if (r.thinking) return { hold: 'still', bubble: frame % 4 < 2 ? '?' : '' }
+  return undefined
+}
+
+/** Passing tests cheer everyone up a little. */
+export function cheer(world: World): World {
+  if (world.pets.length === 0) return world
+  const pets = world.pets.map(p => ({ ...p, fun: clamp(p.fun + 5) }))
+  return { ...world, pets, note: '測試通過，大家都很開心！' }
+}
+
 export type Mood = 'sleep' | 'eat' | 'play' | 'love' | 'sad' | 'idle'
 
 export function mood(p: Pet, now: number): Mood {
@@ -324,10 +365,12 @@ export function newWalker(room: number, frame: number, rand: () => number): Walk
 }
 
 /** Moves the walker one step per frame since it last moved (at most 20, after a pause). */
-export function stepWalker(w: Walker, p: Pet, now: number, frame: number, room: number, rand: () => number): Walker {
+export function stepWalker(w: Walker, p: Pet, now: number, frame: number, room: number, rand: () => number, overlay?: Overlay): Walker {
   const max = Math.max(0, room)
   const m = mood(p, now)
   if (m === 'sleep' || m === 'eat' || m === 'love' || m === 'sad') return { ...w, x: Math.min(w.x, max), frame }
+  // Reacting: a cheer spins on the spot, anything else holds still.
+  if (overlay) return { ...w, x: Math.min(w.x, max), frame, right: overlay.hold === 'spin' ? frame % 2 === 0 : w.right }
   const playing = m === 'play'
   const { speed } = gait(p)
   const next = { ...w, x: Math.min(w.x, max), frame }
@@ -348,10 +391,12 @@ export function stepWalker(w: Walker, p: Pet, now: number, frame: number, room: 
   return next
 }
 
-export function sprite(p: Pet, now: number, frame: number, right = true, resting = false): string[] {
+export function sprite(p: Pet, now: number, frame: number, right = true, resting = false, overlay?: Overlay): string[] {
   const m = mood(p, now)
   const art = p.kind === 'cat' ? CAT_ART : DOG_ART
-  const pose = m === 'sleep' ? 'sleep' : m === 'love' || m === 'eat' || m === 'sad' || resting ? 'sit' : frame % 2 === 0 ? 'walkA' : 'walkB'
+  const reacting = overlay !== undefined && (m === 'idle' || m === 'play')
+  const sitting = m === 'love' || m === 'eat' || m === 'sad' || resting || (reacting && overlay.hold === 'still')
+  const pose = m === 'sleep' ? 'sleep' : sitting ? 'sit' : frame % 2 === 0 ? 'walkA' : 'walkB'
   let face = p.kind === 'cat' ? CAT_FACE[m] : DOG_EYE[m]
   if (m === 'idle' && frame % 7 === 6) face = p.kind === 'cat' ? '-.-' : '-'
   const zz = frame % 2 === 0 ? 'z ' : 'Zz'
@@ -359,6 +404,7 @@ export function sprite(p: Pet, now: number, frame: number, right = true, resting
   if (m === 'love') lines[0] = lines[0].replace(/\s*$/, '') + (frame % 2 === 0 ? '  <3' : ' <3')
   // A sad pet says what it misses, between sighs.
   if (m === 'sad') lines[0] = (lines[0] ?? '').replace(/\s*$/, '') + (frame % 4 < 2 ? '  ' + need(p) : '  ...')
+  if (reacting && overlay.bubble !== '') lines[0] = (lines[0] ?? '').replace(/\s*$/, '') + '  ' + overlay.bubble
   if (m === 'eat') lines[4] = lines[4].padEnd(15) + (frame % 2 === 0 ? '\\_/' : '\\~/')
   // A carried toy sits in the mouth (the snout's row), so it moves and turns with the pet.
   const toy = m === 'play' ? TOYS[p.kind][toyOf(p)] : undefined
