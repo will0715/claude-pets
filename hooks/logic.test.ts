@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { act, adopt, ART_WIDTH, cycle, decay, emptyWorld, fit, mood, parseCommand, rename, sprite } from './logic'
+import { act, adopt, ART_WIDTH, cycle, release, decay, emptyWorld, fit, gait, merge, mood, offset, parseCommand, rename, sprite } from './logic'
 
 test('adopt, feed, play, sleep', () => {
   let w = adopt(emptyWorld(0), 'cat', 0)
@@ -27,7 +27,7 @@ test('adopt, feed, play, sleep', () => {
 test('stats decay over time and cap at 12h', () => {
   const w = adopt(emptyWorld(0), 'dog', 0)
   const later = decay(w, 10 * 60000)
-  expect(later.pets[0].full).toBe(65)
+  expect(later.pets[0].full).toBe(70)
   expect(decay(w, 999 * 3600000).pets[0].full).toBe(0)
 })
 
@@ -93,4 +93,38 @@ test('a trailing name picks the pet', () => {
   w = run(w, 'release 旺財')
   expect(w.pets.map(p => p.name)).toEqual(['小 黑'])
   expect(run(w, 'cat 小 黑').note).toContain('已經有一隻叫 小 黑')
+})
+
+test('merge takes the stored world and keeps the session selection', () => {
+  const base = adopt(adopt(emptyWorld(0), 'cat', 0), 'dog', 1)
+  // This session has the cat selected; another one fed the dog and adopted a third.
+  const mine = { ...cycle(base), frame: 7, note: 'mine' }
+  const theirs = adopt(act(base, 'feed', 1000), 'cat', 2)
+  const w = merge(theirs, mine)
+  expect(w.pets.length).toBe(3)
+  expect(w.pets[1]?.eatingUntil).toBeGreaterThan(0)
+  expect(w.pets[w.selected]?.name).toBe('咪咪')
+  expect([w.frame, w.note]).toEqual([7, 'mine'])
+  // The selected pet was released elsewhere: fall back to the first.
+  expect(merge(release({ ...theirs, selected: 1 }), { ...base, selected: 1 }).selected).toBe(0)
+  expect(merge(undefined, mine)).toBe(mine)
+})
+
+test('each pet walks at its own fixed pace', () => {
+  let w = emptyWorld(0)
+  for (const [kind, t] of [['cat', 1], ['dog', 2], ['cat', 3], ['dog', 4]] as const) w = adopt(w, kind, t * 7919)
+  const gaits = w.pets.map(p => gait(p))
+  for (const g of gaits) {
+    expect(g.speed).toBeGreaterThanOrEqual(0.6)
+    expect(g.speed).toBeLessThanOrEqual(1.4)
+  }
+  expect(gait(w.pets[0]!)).toEqual(gaits[0]!)
+  // Not all in step: over a stretch of frames the pets stand in different places.
+  const now = 100_000
+  const tracks = w.pets.map(p => Array.from({ length: 30 }, (_, f) => offset(p, now, f, 12)).join(','))
+  expect(new Set(tracks).size).toBeGreaterThan(1)
+  for (const track of tracks) for (const x of track.split(',').map(Number)) {
+    expect(x).toBeGreaterThanOrEqual(0)
+    expect(x).toBeLessThanOrEqual(12)
+  }
 })

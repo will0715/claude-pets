@@ -22,6 +22,18 @@ export function adopt(world: World, kind: Kind, now: number): World {
   return { ...world, pets: [...world.pets, pet], selected: world.pets.length, note: `${name} 來到你家了！` }
 }
 
+/**
+ * Another session may have written the store since this one last read it: take
+ * the stored world as the base and keep this session's own view on top (which
+ * pet is selected, its note, the animation frame).
+ */
+export function merge(saved: World | undefined, cur: World): World {
+  if (!saved) return cur
+  const id = cur.pets[cur.selected]?.id
+  const i = saved.pets.findIndex(p => p.id === id)
+  return { ...saved, frame: cur.frame, note: cur.note, selected: i >= 0 ? i : 0 }
+}
+
 /** Stats drift down per elapsed minute; sleeping restores energy. Caps at 12h of absence. */
 export function decay(world: World, now: number): World {
   const minutes = Math.min((now - world.lastTick) / 60000, 720)
@@ -30,7 +42,7 @@ export function decay(world: World, now: number): World {
     const asleep = p.sleepingUntil > now - minutes * 60000
     return {
       ...p,
-      full: clamp(p.full - 1.5 * minutes),
+      full: clamp(p.full - 1 * minutes),
       fun: clamp(p.fun - 2 * minutes),
       energy: clamp(asleep ? p.energy + 6 * minutes : p.energy - 1 * minutes),
     }
@@ -260,11 +272,28 @@ export function mirror(line: string, width: number): string {
   return [...line.padEnd(width)].reverse().map(c => MIRROR[c] ?? c).join('')
 }
 
+/**
+ * Each pet's own pace, fixed by its id so it is the same in every session and
+ * after a restart: a speed of 0.6x to 1.4x and a start offset, so pets do not
+ * walk in step.
+ */
+export function gait(p: Pet): { speed: number; phase: number } {
+  let h = 2166136261
+  for (const c of p.id) h = Math.imul(h ^ c.charCodeAt(0), 16777619) >>> 0
+  return { speed: 0.6 + (h % 81) / 100, phase: (h >>> 8) % 1000 }
+}
+
+/** Distance walked along the back-and-forth track of `room * 2` columns. */
+function stride(p: Pet, now: number, frame: number, room: number): number {
+  const { speed, phase } = gait(p)
+  const pace = mood(p, now) === 'play' ? speed * 2 : speed
+  return Math.floor((frame + phase) * pace) % (room * 2)
+}
+
 /** Is the pet walking right at this frame? Matches `offset`'s bounce. */
 export function facingRight(p: Pet, now: number, frame: number, room: number): boolean {
   if (room <= 0) return true
-  const speed = mood(p, now) === 'play' ? 2 : 1
-  return (frame * speed) % (room * 2) < room
+  return stride(p, now, frame, room) < room
 }
 
 export function sprite(p: Pet, now: number, frame: number, right = true): string[] {
@@ -287,8 +316,7 @@ export function offset(p: Pet, now: number, frame: number, room: number): number
   const m = mood(p, now)
   if (m === 'sleep' || m === 'eat' || m === 'love' || m === 'sad') return null
   if (room <= 0) return 0
-  const speed = m === 'play' ? 2 : 1
-  const t = (frame * speed) % (room * 2)
+  const t = stride(p, now, frame, room)
   return t < room ? t : room * 2 - t
 }
 

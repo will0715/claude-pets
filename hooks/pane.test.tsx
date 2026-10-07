@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import { adopt, emptyWorld } from './logic'
 
 test('adopt and play from the pane on terminal and desktop', async ($, on) => {
   mock.clock(on)
@@ -25,4 +26,13 @@ test('/pets subcommands act without opening the pane', async ($, on) => {
   expect(await say('play')).toContain('毛線球')
   expect(await say('rename 阿福')).toContain('改名叫 阿福')
   expect(await say('dance')).toContain('用法')
+})
+
+test('an action starts from what another session stored', async ($, on) => {
+  mock.clock(on)
+  // Another session adopted two pets and wrote the store; this session's own copy is empty.
+  mock.store(on, { world: adopt(adopt(emptyWorld(0), 'cat', 0), 'dog', 0) })
+  const say = async (args: string) => ((await $.command.run({ command: 'pets', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })) as { text?: string }).text ?? ''
+  expect(await say('feed 咪咪')).toBe('咪咪 吃了小魚乾')
+  expect(await say('next 旺財')).toBe('選了 旺財')
 })

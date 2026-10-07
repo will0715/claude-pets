@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
 import type { World } from '../types'
-import { act, adopt, parseCommand, rename, USAGE, ART_WIDTH, bar, cycle, decay, emptyWorld, facingRight, fit, offset, release, sprite, toyLine } from './logic'
+import { act, adopt, merge, parseCommand, rename, USAGE, ART_WIDTH, bar, cycle, decay, emptyWorld, facingRight, fit, offset, release, sprite, toyLine } from './logic'
 
 const PANE = 'pets'
 const STORE_KEY = 'world'
@@ -11,9 +11,12 @@ const renaming = atom({ plugin: 'pets', key: 'renaming' } as const, false)
 // Where each pet last stood, so it stays put while sitting or sleeping.
 const lastX = new Map<string, { x: number; right: boolean }>()
 
+// Every change starts from the store, so one session's actions are not
+// overwritten by another session's older copy.
 async function change($: EngineInterface, fn: (w: World, now: number) => World) {
   const now = await $.clock.now()
-  const w = await update($, world, cur => fn(decay(cur, now), now))
+  const saved = (await $.store.get(STORE_KEY)) as World | undefined
+  const w = await update($, world, cur => fn(decay(merge(saved, cur), now), now))
   await $.store.set(STORE_KEY, { ...w, frame: 0 })
 }
 
