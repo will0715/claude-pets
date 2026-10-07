@@ -34,20 +34,53 @@ export function merge(saved: World | undefined, cur: World): World {
   return { ...saved, frame: cur.frame, note: cur.note, selected: i >= 0 ? i : 0 }
 }
 
-/** Stats drift down per elapsed minute; sleeping restores energy. Caps at 12h of absence. */
+export const HUNGRY = 25
+export const TIRED = 20
+const NAP_MINUTES = 10
+
+/**
+ * What a pet does on its own at minute `t`: eats when hungry, naps when tired.
+ * Returns the pet and a note when it did something.
+ */
+export function live(p: Pet, t: number): { pet: Pet; note?: string } {
+  if (p.sleepingUntil > t) return { pet: p }
+  if (p.full < HUNGRY) {
+    const pet = { ...p, full: clamp(p.full + 30), eatingUntil: t + 3000 }
+    return { pet, note: `${p.name} 肚子餓，自己去吃飯了` }
+  }
+  if (p.energy < TIRED) {
+    return { pet: { ...p, sleepingUntil: t + NAP_MINUTES * 60000 }, note: `${p.name} 累了，自己去睡覺（${NAP_MINUTES} 分鐘）` }
+  }
+  return { pet: p }
+}
+
+/**
+ * Plays out every whole minute since the last tick: stats drift down, sleeping
+ * restores energy, and each pet looks after itself (`live`). Caps at 12h of absence.
+ */
 export function decay(world: World, now: number): World {
-  const minutes = Math.min((now - world.lastTick) / 60000, 720)
-  if (minutes < 1) return world
-  const pets = world.pets.map(p => {
-    const asleep = p.sleepingUntil > now - minutes * 60000
-    return {
-      ...p,
-      full: clamp(p.full - 1 * minutes),
-      fun: clamp(p.fun - 2 * minutes),
-      energy: clamp(asleep ? p.energy + 6 * minutes : p.energy - 1 * minutes),
-    }
-  })
-  return { ...world, pets, lastTick: now }
+  const elapsed = Math.floor((now - world.lastTick) / 60000)
+  if (elapsed < 1) return world
+  const minutes = Math.min(elapsed, 720)
+  const start = now - ((now - world.lastTick) % 60000) - minutes * 60000
+  let pets = world.pets
+  let note = world.note
+  for (let m = 1; m <= minutes; m++) {
+    const t = start + m * 60000
+    pets = pets.map(p => {
+      const asleep = p.sleepingUntil > t - 60000
+      const drifted = {
+        ...p,
+        full: clamp(p.full - 1),
+        fun: clamp(p.fun - 2),
+        energy: clamp(asleep ? p.energy + 6 : p.energy - 1),
+      }
+      const lived = live(drifted, t)
+      if (lived.note) note = lived.note
+      return lived.pet
+    })
+  }
+  return { ...world, pets, note, lastTick: start + minutes * 60000 }
 }
 
 type Action = 'feed' | 'pet' | 'play' | 'sleep'
@@ -73,7 +106,7 @@ export function act(world: World, action: Action, now: number): World {
     if (p.energy < 15) note = `${p.name} 太累了，讓牠睡一下`
     else {
       next = { ...p, fun: clamp(p.fun + 25), energy: clamp(p.energy - 15), full: clamp(p.full - 5), playingUntil: now + 6000 }
-      note = p.kind === 'cat' ? `${p.name} 撲向毛線球！` : `${p.name} 追著球跑！`
+      note = `${p.name} ${TOYS[p.kind][toyOf(next)]!.note}`
     }
   } else {
     if (p.sleepingUntil > now) {
@@ -263,8 +296,8 @@ const DOG_ART: Record<string, string[]> = {
 export const ART_WIDTH = 22
 export const ART_HEIGHT = 5
 
-const CAT_FACE: Record<Mood, string> = { idle: 'o.o', love: '^.^', eat: 'o.o', play: 'O.O', sleep: '-.-', sad: ';.;' }
-const DOG_EYE: Record<Mood, string> = { idle: 'o', love: '^', eat: 'o', play: 'O', sleep: '-', sad: ';' }
+const CAT_FACE: Record<Mood, string> = { idle: 'o.o', love: '^.^', eat: 'o.o', play: 'O.O', sleep: '-.-', sad: 'T.T' }
+const DOG_EYE: Record<Mood, string> = { idle: 'o', love: '^', eat: 'o', play: 'O', sleep: '-', sad: 'T' }
 
 const MIRROR: Record<string, string> = { '/': '\\', '\\': '/', '(': ')', ')': '(', '<': '>', '>': '<', '`': "'", "'": '`', '[': ']', ']': '[', '{': '}', '}': '{' }
 
@@ -324,18 +357,51 @@ export function sprite(p: Pet, now: number, frame: number, right = true, resting
   const zz = frame % 2 === 0 ? 'z ' : 'Zz'
   let lines = art[pose].map(l => l.replace('FACE', face).replace('E\\', face + '\\').replace('(E', '(' + face).replace('ZZ', zz))
   if (m === 'love') lines[0] = lines[0].replace(/\s*$/, '') + (frame % 2 === 0 ? '  <3' : ' <3')
+  // A sad pet says what it misses, between sighs.
+  if (m === 'sad') lines[0] = (lines[0] ?? '').replace(/\s*$/, '') + (frame % 4 < 2 ? '  ' + need(p) : '  ...')
   if (m === 'eat') lines[4] = lines[4].padEnd(15) + (frame % 2 === 0 ? '\\_/' : '\\~/')
   lines = lines.map(l => l.padEnd(ART_WIDTH).slice(0, ART_WIDTH))
   if (!right && pose !== 'sit' && pose !== 'sleep') lines = lines.map(l => mirror(l, ART_WIDTH))
   return lines
 }
 
+type Toy = { glyph: string; note: string; path: 'bounce' | 'flick' | 'hop' }
+
+/** Each play picks one toy; each toy moves its own way along the line under the pet. */
+export const TOYS: Record<Kind, Toy[]> = {
+  cat: [
+    { glyph: '@', note: '撲向毛線球！', path: 'bounce' },
+    { glyph: '~>', note: '追著逗貓棒跳來跳去！', path: 'flick' },
+    { glyph: '<:3', note: '在抓玩具老鼠！', path: 'hop' },
+  ],
+  dog: [
+    { glyph: 'o', note: '追著球跑！', path: 'bounce' },
+    { glyph: '==', note: '跳起來接飛盤！', path: 'flick' },
+    { glyph: '__/', note: '叼著樹枝跑來跑去！', path: 'hop' },
+  ],
+}
+
+/** The toy of the pet's latest play, read off when the play started so nothing new is stored. */
+export function toyOf(p: Pet): number {
+  return Math.floor(p.playingUntil / 1000) % 3
+}
+
+/** What a sad pet misses most, as a short ASCII bubble. */
+export function need(p: Pet): string {
+  const low = Math.min(p.full, p.fun, p.energy)
+  return low === p.full ? 'food?' : low === p.fun ? 'play?' : 'zzz?'
+}
+
 export function toyLine(p: Pet, now: number, frame: number, width: number): string {
   if (mood(p, now) !== 'play' || width < 4) return ''
-  const span = width - 1
-  const t = (frame * 3) % (span * 2)
-  const x = t < span ? t : span * 2 - t
-  return ' '.repeat(x) + (p.kind === 'cat' ? '@' : 'o')
+  const toy = TOYS[p.kind][toyOf(p)]!
+  const span = Math.max(1, width - toy.glyph.length)
+  const along = (speed: number) => {
+    const t = (frame * speed) % (span * 2)
+    return t < span ? t : span * 2 - t
+  }
+  const x = toy.path === 'bounce' ? along(3) : toy.path === 'flick' ? along(7) : Math.floor(Math.abs(Math.sin(frame * 1.7)) * span)
+  return ' '.repeat(x) + toy.glyph
 }
 
 export function bar(n: number, width = 6): string {

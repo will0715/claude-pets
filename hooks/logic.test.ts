@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { act, adopt, ART_WIDTH, cycle, release, decay, emptyWorld, fit, gait, merge, mood, newWalker, parseCommand, rename, sprite, stepWalker } from './logic'
+import { act, adopt, ART_WIDTH, HUNGRY, TIRED, cycle, release, decay, emptyWorld, fit, gait, merge, mood, need, newWalker, parseCommand, rename, sprite, stepWalker, TOYS, toyLine, toyOf } from './logic'
 
 test('adopt, feed, play, sleep', () => {
   let w = adopt(emptyWorld(0), 'cat', 0)
@@ -27,8 +27,31 @@ test('adopt, feed, play, sleep', () => {
 test('stats decay over time and cap at 12h', () => {
   const w = adopt(emptyWorld(0), 'dog', 0)
   const later = decay(w, 10 * 60000)
-  expect(later.pets[0].full).toBe(70)
-  expect(decay(w, 999 * 3600000).pets[0].full).toBe(0)
+  expect(later.pets[0]?.full).toBe(70)
+  expect(later.lastTick).toBe(10 * 60000)
+  // Part of a minute waits for the next tick.
+  expect(decay(w, 10 * 60000 + 30000).lastTick).toBe(10 * 60000)
+})
+
+test('pets eat and nap on their own', () => {
+  let w = adopt(emptyWorld(0), 'cat', 0)
+  // full 80 drops 1 a minute: below 25 after 56 minutes, then the cat eats.
+  w = decay(w, 56 * 60000)
+  expect(w.pets[0]?.full).toBe(54)
+  expect(w.note).toBe('咪咪 肚子餓，自己去吃飯了')
+
+  // energy 80 drops 1 a minute: below 20 after 61 minutes, then a 10 minute nap.
+  w = decay(adopt(emptyWorld(0), 'dog', 0), 61 * 60000)
+  expect(w.pets[0]?.sleepingUntil).toBe(71 * 60000)
+  expect(w.note).toBe('旺財 累了，自己去睡覺（10 分鐘）')
+  expect(mood(w.pets[0]!, 61 * 60000 + 1)).toBe('sleep')
+  w = decay(w, 71 * 60000)
+  expect(w.pets[0]?.energy).toBe(79)
+
+  // Left alone for days, a pet keeps itself fed and rested.
+  const away = decay(adopt(emptyWorld(0), 'cat', 0), 999 * 3600000).pets[0]!
+  expect(away.full).toBeGreaterThanOrEqual(HUNGRY - 1)
+  expect(away.energy).toBeGreaterThanOrEqual(TIRED - 1)
 })
 
 test('rename the selected pet', () => {
@@ -143,4 +166,31 @@ test('pets wander at random inside the pane', () => {
   expect(still.x).toBe(7)
   expect(gait(w.pets[0]!).speed).toBeGreaterThanOrEqual(0.6)
   expect(gait(w.pets[0]!).speed).toBeLessThanOrEqual(1.4)
+})
+
+test('a sad pet shows what it misses', () => {
+  const cat = { ...adopt(emptyWorld(0), 'cat', 0).pets[0]!, fun: 3, heartsUntil: 0 }
+  expect(need(cat)).toBe('play?')
+  expect(sprite(cat, 10, 0)[0]).toContain('play?')
+  expect(sprite(cat, 10, 2)[0]).toContain('...')
+  expect(sprite(cat, 10, 0).join('\n')).toContain('T.T')
+  for (const line of sprite(cat, 10, 0)) expect(line.length).toBe(ART_WIDTH)
+  const dog = { ...adopt(emptyWorld(0), 'dog', 0).pets[0]!, full: 5, heartsUntil: 0 }
+  expect(sprite(dog, 10, 0)[0]).toContain('food?')
+})
+
+test('each play picks one of three toys', () => {
+  for (const kind of ['cat', 'dog'] as const) {
+    const notes = new Set([0, 1000, 2000].map(t => act(adopt(emptyWorld(0), kind, 0), 'play', t).note))
+    expect(notes.size).toBe(3)
+    for (const t of [0, 1000, 2000]) {
+      const p = act(adopt(emptyWorld(0), kind, 0), 'play', t).pets[0]!
+      const glyph = TOYS[kind][toyOf(p)]!.glyph
+      for (let f = 0; f < 10; f++) {
+        const line = toyLine(p, t + 1, f, 40)
+        expect(line.length).toBeLessThanOrEqual(40)
+        expect(line.trim()).toBe(glyph)
+      }
+    }
+  }
 })
