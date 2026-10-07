@@ -272,34 +272,53 @@ export function mirror(line: string, width: number): string {
   return [...line.padEnd(width)].reverse().map(c => MIRROR[c] ?? c).join('')
 }
 
-/**
- * Each pet's own pace, fixed by its id so it is the same in every session and
- * after a restart: a speed of 0.6x to 1.4x and a start offset, so pets do not
- * walk in step.
- */
-export function gait(p: Pet): { speed: number; phase: number } {
+/** Each pet's own walking speed, 0.6x to 1.4x, fixed by its id so it is the same in every session. */
+export function gait(p: Pet): { speed: number } {
   let h = 2166136261
   for (const c of p.id) h = Math.imul(h ^ c.charCodeAt(0), 16777619) >>> 0
-  return { speed: 0.6 + (h % 81) / 100, phase: (h >>> 8) % 1000 }
+  return { speed: 0.6 + (h % 81) / 100 }
 }
 
-/** Distance walked along the back-and-forth track of `room * 2` columns. */
-function stride(p: Pet, now: number, frame: number, room: number): number {
-  const { speed, phase } = gait(p)
-  const pace = mood(p, now) === 'play' ? speed * 2 : speed
-  return Math.floor((frame + phase) * pace) % (room * 2)
+/**
+ * Where a pet is on screen and what it is doing: walking, running or resting
+ * for `left` more frames, then it picks again at random. Only for drawing, so
+ * it lives in the session and is never stored.
+ */
+export type Walker = { x: number; right: boolean; mode: 'walk' | 'run' | 'rest'; left: number; frame: number }
+
+export function newWalker(room: number, frame: number, rand: () => number): Walker {
+  return { x: Math.floor(rand() * Math.max(0, room)), right: rand() < 0.5, mode: 'walk', left: 0, frame }
 }
 
-/** Is the pet walking right at this frame? Matches `offset`'s bounce. */
-export function facingRight(p: Pet, now: number, frame: number, room: number): boolean {
-  if (room <= 0) return true
-  return stride(p, now, frame, room) < room
+/** Moves the walker one step per frame since it last moved (at most 20, after a pause). */
+export function stepWalker(w: Walker, p: Pet, now: number, frame: number, room: number, rand: () => number): Walker {
+  const max = Math.max(0, room)
+  const m = mood(p, now)
+  if (m === 'sleep' || m === 'eat' || m === 'love' || m === 'sad') return { ...w, x: Math.min(w.x, max), frame }
+  const playing = m === 'play'
+  const { speed } = gait(p)
+  const next = { ...w, x: Math.min(w.x, max), frame }
+  for (let i = Math.min(frame - w.frame, 20); i > 0; i--) {
+    if (next.left <= 0) {
+      const r = rand()
+      // Playing pets rest less and run more.
+      next.mode = r < (playing ? 0.05 : 0.25) ? 'rest' : r < (playing ? 0.6 : 0.4) ? 'run' : 'walk'
+      next.left = next.mode === 'walk' ? 4 + Math.floor(rand() * 8) : 3 + Math.floor(rand() * 5)
+      if (rand() < 0.4) next.right = !next.right
+    }
+    const move = next.mode === 'rest' ? 0 : next.mode === 'run' ? speed * 3 : speed
+    next.x += next.right ? move : -move
+    if (next.x <= 0) [next.x, next.right] = [0, true]
+    if (next.x >= max) [next.x, next.right] = [max, false]
+    next.left--
+  }
+  return next
 }
 
-export function sprite(p: Pet, now: number, frame: number, right = true): string[] {
+export function sprite(p: Pet, now: number, frame: number, right = true, resting = false): string[] {
   const m = mood(p, now)
   const art = p.kind === 'cat' ? CAT_ART : DOG_ART
-  const pose = m === 'sleep' ? 'sleep' : m === 'love' || m === 'eat' || m === 'sad' ? 'sit' : frame % 2 === 0 ? 'walkA' : 'walkB'
+  const pose = m === 'sleep' ? 'sleep' : m === 'love' || m === 'eat' || m === 'sad' || resting ? 'sit' : frame % 2 === 0 ? 'walkA' : 'walkB'
   let face = p.kind === 'cat' ? CAT_FACE[m] : DOG_EYE[m]
   if (m === 'idle' && frame % 7 === 6) face = p.kind === 'cat' ? '-.-' : '-'
   const zz = frame % 2 === 0 ? 'z ' : 'Zz'
@@ -309,15 +328,6 @@ export function sprite(p: Pet, now: number, frame: number, right = true): string
   lines = lines.map(l => l.padEnd(ART_WIDTH).slice(0, ART_WIDTH))
   if (!right && pose !== 'sit' && pose !== 'sleep') lines = lines.map(l => mirror(l, ART_WIDTH))
   return lines
-}
-
-/** Horizontal offset for walking back and forth inside `room` columns. */
-export function offset(p: Pet, now: number, frame: number, room: number): number | null {
-  const m = mood(p, now)
-  if (m === 'sleep' || m === 'eat' || m === 'love' || m === 'sad') return null
-  if (room <= 0) return 0
-  const t = stride(p, now, frame, room)
-  return t < room ? t : room * 2 - t
 }
 
 export function toyLine(p: Pet, now: number, frame: number, width: number): string {

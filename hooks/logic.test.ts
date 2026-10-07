@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { act, adopt, ART_WIDTH, cycle, release, decay, emptyWorld, fit, gait, merge, mood, offset, parseCommand, rename, sprite } from './logic'
+import { act, adopt, ART_WIDTH, cycle, release, decay, emptyWorld, fit, gait, merge, mood, newWalker, parseCommand, rename, sprite, stepWalker } from './logic'
 
 test('adopt, feed, play, sleep', () => {
   let w = adopt(emptyWorld(0), 'cat', 0)
@@ -110,21 +110,37 @@ test('merge takes the stored world and keeps the session selection', () => {
   expect(merge(undefined, mine)).toBe(mine)
 })
 
-test('each pet walks at its own fixed pace', () => {
-  let w = emptyWorld(0)
-  for (const [kind, t] of [['cat', 1], ['dog', 2], ['cat', 3], ['dog', 4]] as const) w = adopt(w, kind, t * 7919)
-  const gaits = w.pets.map(p => gait(p))
-  for (const g of gaits) {
-    expect(g.speed).toBeGreaterThanOrEqual(0.6)
-    expect(g.speed).toBeLessThanOrEqual(1.4)
-  }
-  expect(gait(w.pets[0]!)).toEqual(gaits[0]!)
-  // Not all in step: over a stretch of frames the pets stand in different places.
+test('pets wander at random inside the pane', () => {
+  // A fixed sequence stands in for Math.random so the run is repeatable.
+  let seed = 1
+  const rand = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646
+  const w = adopt(adopt(emptyWorld(0), 'cat', 1), 'dog', 2)
   const now = 100_000
-  const tracks = w.pets.map(p => Array.from({ length: 30 }, (_, f) => offset(p, now, f, 12)).join(','))
-  expect(new Set(tracks).size).toBeGreaterThan(1)
-  for (const track of tracks) for (const x of track.split(',').map(Number)) {
-    expect(x).toBeGreaterThanOrEqual(0)
-    expect(x).toBeLessThanOrEqual(12)
+  const room = 20
+  const runs = w.pets.map(p => {
+    let walker = newWalker(room, 0, rand)
+    const seen = { xs: [] as number[], modes: new Set<string>(), turns: 0 }
+    for (let f = 1; f <= 300; f++) {
+      const next = stepWalker(walker, p, now, f, room, rand)
+      if (next.right !== walker.right) seen.turns++
+      walker = next
+      seen.xs.push(Math.round(walker.x))
+      seen.modes.add(walker.mode)
+    }
+    return seen
+  })
+  for (const run of runs) {
+    expect(Math.min(...run.xs)).toBeGreaterThanOrEqual(0)
+    expect(Math.max(...run.xs)).toBeLessThanOrEqual(room)
+    expect([...run.modes].sort()).toEqual(['rest', 'run', 'walk'])
+    expect(run.turns).toBeGreaterThan(5)
   }
+  expect(runs[0]!.xs.join()).not.toBe(runs[1]!.xs.join())
+
+  // A sleeping pet stays where it is.
+  const asleep = act(w, 'sleep', now).pets[1]!
+  const still = stepWalker({ x: 7, right: true, mode: 'walk', left: 3, frame: 0 }, asleep, now + 1000, 10, room, rand)
+  expect(still.x).toBe(7)
+  expect(gait(w.pets[0]!).speed).toBeGreaterThanOrEqual(0.6)
+  expect(gait(w.pets[0]!).speed).toBeLessThanOrEqual(1.4)
 })

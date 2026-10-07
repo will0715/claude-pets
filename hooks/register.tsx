@@ -2,14 +2,15 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
 import type { World } from '../types'
-import { act, adopt, merge, parseCommand, rename, USAGE, ART_WIDTH, bar, cycle, decay, emptyWorld, facingRight, fit, offset, release, sprite, toyLine } from './logic'
+import type { Walker } from './logic'
+import { act, adopt, merge, parseCommand, rename, USAGE, ART_WIDTH, bar, cycle, decay, emptyWorld, fit, newWalker, release, sprite, stepWalker, toyLine } from './logic'
 
 const PANE = 'pets'
 const STORE_KEY = 'world'
 const world = atom({ plugin: 'pets', key: 'world' } as const, emptyWorld(0))
 const renaming = atom({ plugin: 'pets', key: 'renaming' } as const, false)
-// Where each pet last stood, so it stays put while sitting or sleeping.
-const lastX = new Map<string, { x: number; right: boolean }>()
+// Where each pet is and what it is doing; drawing only, so a reload starts it afresh.
+const walkers = new Map<string, Walker>()
 
 // Every change starts from the store, so one session's actions are not
 // overwritten by another session's older copy.
@@ -37,11 +38,9 @@ async function petsView($: EngineInterface, e: RenderInput<'Pane'>, bodyColumns:
         {w.pets.length === 0 && <Text dimColor>還沒有寵物，按 c 領養貓、d 領養狗。</Text>}
         {w.pets.map((p, i) => {
           const room = width - ART_WIDTH
-          const walked = offset(p, now, w.frame, room)
-          const prev = lastX.get(p.id) ?? { x: 0, right: true }
-          const pos = walked === null ? { x: Math.min(prev.x, Math.max(0, room)), right: prev.right } : { x: walked, right: facingRight(p, now, w.frame, room) }
-          lastX.set(p.id, pos)
-          const lines = sprite(p, now, w.frame, pos.right).map(l => fit(' '.repeat(pos.x) + l, width).trimEnd() || ' ')
+          const pos = stepWalker(walkers.get(p.id) ?? newWalker(room, w.frame, Math.random), p, now, w.frame, room, Math.random)
+          walkers.set(p.id, pos)
+          const lines = sprite(p, now, w.frame, pos.right, pos.mode === 'rest').map(l => fit(' '.repeat(Math.round(pos.x)) + l, width).trimEnd() || ' ')
           const toy = toyLine(p, now, w.frame, width)
           if (toy !== '') lines.push(fit(toy, width).trimEnd())
           const isSel = i === w.selected
