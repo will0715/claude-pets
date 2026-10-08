@@ -2,8 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
 import type { Reaction, World } from '../types'
-import type { Walker } from './logic'
-import { act, adopt, merge, parseCommand, rename, USAGE, ART_WIDTH, bar, cycle, cheer, decay, emptyWorld, fit, isTestCommand, newWalker, NO_REACTION, overlayFor, react, release, sprite, stepWalker, toyLine } from './logic'
+import type { Encounter, Walker } from './logic'
+import { act, adopt, merge, parseCommand, rename, USAGE, ART_WIDTH, bar, cycle, befriend, cheer, decay, emptyWorld, encounterOverlay, fit, isTestCommand, meet, MEET_COOLDOWN, migrate, stageName, newWalker, NO_REACTION, overlayFor, react, release, sprite, stepWalker, toyLine } from './logic'
 
 const PANE = 'pets'
 const STORE_KEY = 'world'
@@ -12,13 +12,16 @@ const renaming = atom({ plugin: 'pets', key: 'renaming' } as const, false)
 const reaction = atom({ plugin: 'pets', key: 'reaction' } as const, NO_REACTION)
 // Where each pet is and what it is doing; drawing only, so a reload starts it afresh.
 const walkers = new Map<string, Walker>()
+// The meeting going on, if any, and the frame after which the next may start.
+let encounter: Encounter | null = null
+let nextMeet = 0
 
 // Every change starts from the store, so one session's actions are not
 // overwritten by another session's older copy.
 async function change($: EngineInterface, fn: (w: World, now: number) => World) {
   const now = await $.clock.now()
   const saved = (await $.store.get(STORE_KEY)) as World | undefined
-  const w = await update($, world, cur => fn(decay(merge(saved, cur), now), now))
+  const w = await update($, world, cur => fn(decay(migrate(merge(saved, cur), now), now), now))
   await $.store.set(STORE_KEY, { ...w, frame: 0 })
 }
 
@@ -40,7 +43,7 @@ async function petsView($: EngineInterface, e: RenderInput<'Pane'>, bodyColumns:
         {w.pets.length === 0 && <Text dimColor>還沒有寵物，按 c 領養貓、d 領養狗。</Text>}
         {w.pets.map((p, i) => {
           const room = width - ART_WIDTH
-          const overlay = overlayFor(mood, now, w.frame, i === w.selected)
+          const overlay = overlayFor(mood, now, w.frame, i === w.selected) ?? encounterOverlay(encounter, p.id, w.frame)
           const pos = stepWalker(walkers.get(p.id) ?? newWalker(room, w.frame, Math.random), p, now, w.frame, room, Math.random, overlay)
           walkers.set(p.id, pos)
           const lines = sprite(p, now, w.frame, pos.right, pos.mode === 'rest', overlay).map(l => fit(' '.repeat(Math.round(pos.x)) + l, width).trimEnd() || ' ')
@@ -51,7 +54,7 @@ async function petsView($: EngineInterface, e: RenderInput<'Pane'>, bodyColumns:
             <Box flexDirection="column">
               <Text bold={isSel} dimColor={!isSel} wrap="truncate-end">
                 {isSel ? '> ' : '  '}
-                {p.name}（{p.kind === 'cat' ? '貓' : '狗'}）
+                {p.name}（{stageName(p, now)}）
               </Text>
               {lines.map(line => (
                 <Text wrap="truncate-end">{line}</Text>
@@ -99,15 +102,24 @@ export const register: Register = on => {
     const result = await next(e)
     const now = await $.clock.now()
     const saved = (await $.store.get(STORE_KEY)) as World | undefined
-    await update($, world, () => decay(saved ?? emptyWorld(now), now))
+    await update($, world, () => decay(migrate(saved ?? emptyWorld(now), now), now))
 
     await update($, renaming, () => false)
 
     await $.command.register({ name: 'pets', description: '打開寵物 pane，或直接下指令：feed、pet、play、sleep、next、cat、dog、release、rename；最後加寵物名可指定對象', argumentHint: '[指令] [寵物名]' })
     void $.ui.open({ id: PANE, title: 'Pets' })
 
-    $.clock.every(800, () => {
-      void update($, world, w => ({ ...w, frame: w.frame + 1 }))
+    $.clock.every(800, async () => {
+      const w = await update($, world, cur => ({ ...cur, frame: cur.frame + 1 }))
+      // Pets standing together may meet, once the last meeting has worn off.
+      if (w.frame < nextMeet || w.pets.length < 2) return
+      const at = new Map([...walkers].map(([id, k]) => [id, Math.round(k.x)]))
+      const now = await $.clock.now()
+      const met = meet(w.pets, at, now, w.frame, Math.random)
+      if (!met) return
+      encounter = met
+      nextMeet = met.until + MEET_COOLDOWN
+      await change($, x => befriend(x, met))
     })
     $.clock.every(60000, () => {
       void change($, w => w)

@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
-import { act, adopt, ART_WIDTH, HUNGRY, TIRED, cycle, release, decay, emptyWorld, cheer, fit, gait, isTestCommand, merge, mood, need, newWalker, NO_REACTION, overlayFor, parseCommand, react, rename, sprite, stepWalker, TOYS, toyLine, toyOf } from './logic'
+import type { Pet } from '../types'
+import { act, adopt, ART_WIDTH, HUNGRY, TIRED, cycle, release, decay, emptyWorld, befriend, cheer, encounterOverlay, fit, gait, GROWN_AFTER_DAYS, isGrown, meet, migrate, stageName, isTestCommand, merge, mood, need, newWalker, NO_REACTION, overlayFor, parseCommand, react, rename, sprite, stepWalker, TOYS, toyLine, toyOf } from './logic'
 
 test('adopt, feed, play, sleep', () => {
   let w = adopt(emptyWorld(0), 'cat', 0)
@@ -240,4 +241,66 @@ test('pets react to tests, failures and thinking', () => {
   for (const line of sprite(cat, t, 0, true, false, spin)) expect(line.length).toBe(ART_WIDTH)
   const asleep = act({ ...w, selected: 0 }, 'sleep', t).pets[0]!
   expect(sprite(asleep, t + 1, 0, true, false, spin).join('')).not.toContain('yay!')
+})
+
+test('pets standing together meet', () => {
+  const t = 10_000
+  const w = adopt(adopt(adopt(emptyWorld(0), 'cat', 0), 'dog', 1), 'cat', 2)
+  const [cat, dog, cat2] = w.pets as [Pet, Pet, Pet]
+  const near = new Map([[cat.id, 10], [dog.id, 12], [cat2.id, 30]])
+  // No luck this frame.
+  expect(meet(w.pets, near, t, 0, () => 0.9)).toBeNull()
+  // Too far apart.
+  expect(meet(w.pets, new Map([[cat.id, 0], [dog.id, 20]]), t, 0, () => 0)).toBeNull()
+  // Busy pets do not meet.
+  expect(meet(act({ ...w, selected: 1 }, 'sleep', t).pets, near, t + 1, 0, () => 0)).toBeNull()
+
+  // Lucky: cat and dog, roll 0.5 -> swat, cat first.
+  const rolls = [0.1, 0.5]
+  const swat = meet([dog, cat], near, t, 100, () => rolls.shift() ?? 0)
+  expect(swat).toEqual({ kind: 'swat', a: cat.id, b: dog.id, until: 106 })
+  expect(encounterOverlay(swat, cat.id, 100)?.bubble).toBe('paw!')
+  expect(encounterOverlay(swat, dog.id, 100)?.bubble).toBe('!!')
+  expect(encounterOverlay(swat, cat2.id, 100)).toBeUndefined()
+  expect(encounterOverlay(swat, cat.id, 106)).toBeUndefined()
+  expect(befriend(w, swat!).note).toBe('咪咪 拍了 旺財 一下')
+
+  // Two cats: play cheers both up.
+  const play = meet([cat, cat2], new Map([[cat.id, 5], [cat2.id, 5]]), t, 0, () => 0.1)!
+  expect(play.kind).toBe('play')
+  const after = befriend(w, play)
+  expect(after.pets.map(p => p.fun)).toEqual([85, 80, 85])
+  expect(after.note).toBe('咪咪 和 橘子 玩在一起！')
+  expect(encounterOverlay(play, cat.id, 0)?.hold).toBe('still')
+})
+
+test('pets start small and grow up after a week', () => {
+  const day = 86400000
+  const w = adopt(adopt(emptyWorld(0), 'cat', 0), 'dog', 0)
+  const [cat, dog] = w.pets as [Pet, Pet]
+  expect(cat.bornAt).toBe(0)
+  expect(isGrown(cat, 6 * day)).toBe(false)
+  expect(isGrown(cat, GROWN_AFTER_DAYS * day)).toBe(true)
+  expect([stageName(cat, 0), stageName(dog, 0)]).toEqual(['幼貓', '小狗'])
+  expect([stageName(cat, 8 * day), stageName(dog, 8 * day)]).toEqual(['貓', '狗'])
+
+  // A pet saved before bornAt existed starts as a baby from now.
+  const { bornAt: _, ...old } = cat
+  const migrated = migrate({ ...w, pets: [old as Pet] }, 500)
+  expect(migrated.pets[0]?.bornAt).toBe(500)
+  expect(migrate(w, 500)).toBe(w)
+
+  // Growing up is announced by the tick that crosses the line.
+  const grownUp = decay({ ...w, lastTick: 7 * day - 60000 }, 7 * day)
+  expect(grownUp.note).toBe('旺財 長大了！')
+
+  // Baby and adult art both fill the frame, every pose and facing.
+  for (const p of w.pets) for (const now of [10_000, 8 * day]) for (const f of [0, 1]) for (const right of [true, false]) {
+    for (const line of sprite(p, now, f, right)) expect(line.length).toBe(ART_WIDTH)
+    for (const line of sprite(p, now, f, right, true)) expect(line.length).toBe(ART_WIDTH)
+    const asleep = act({ ...w, selected: w.pets.indexOf(p) }, 'sleep', now).pets[w.pets.indexOf(p)]!
+    for (const line of sprite(asleep, now + 1, f, right)) expect(line.length).toBe(ART_WIDTH)
+  }
+  expect(sprite(cat, 10_000, 0).join('')).not.toBe(sprite(cat, 8 * day, 0).join(''))
+  expect(sprite(dog, 10_000, 0).join('\n')).toContain('o\\___')
 })

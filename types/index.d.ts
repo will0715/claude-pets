@@ -11,6 +11,8 @@ export type Pet = {
   playingUntil: number
   heartsUntil: number
   eatingUntil: number
+  /** When it was adopted; a pet saved before this field existed gets it on load. */
+  bornAt?: number
 }
 
 export type World = {

@@ -17,9 +17,26 @@ export function adopt(world: World, kind: Kind, now: number): World {
   const name = names.find(n => !used.has(n)) ?? `${kind}${world.pets.length + 1}`
   const pet: Pet = {
     id: `${kind}-${now}`, kind, name, full: 80, fun: 80, energy: 80,
-    sleepingUntil: 0, playingUntil: 0, heartsUntil: now + 3000, eatingUntil: 0,
+    sleepingUntil: 0, playingUntil: 0, heartsUntil: now + 3000, eatingUntil: 0, bornAt: now,
   }
   return { ...world, pets: [...world.pets, pet], selected: world.pets.length, note: `${name} 來到你家了！` }
+}
+
+export const GROWN_AFTER_DAYS = 7
+
+/** Pets saved before `bornAt` existed start as babies from now. */
+export function migrate(world: World, now: number): World {
+  if (world.pets.every(p => p.bornAt !== undefined)) return world
+  return { ...world, pets: world.pets.map(p => (p.bornAt === undefined ? { ...p, bornAt: now } : p)) }
+}
+
+export function isGrown(p: Pet, now: number): boolean {
+  return p.bornAt !== undefined && now - p.bornAt >= GROWN_AFTER_DAYS * 86400000
+}
+
+export function stageName(p: Pet, now: number): string {
+  if (p.kind === 'cat') return isGrown(p, now) ? '貓' : '幼貓'
+  return isGrown(p, now) ? '狗' : '小狗'
 }
 
 /**
@@ -80,7 +97,9 @@ export function decay(world: World, now: number): World {
       return lived.pet
     })
   }
-  return { ...world, pets, note, lastTick: start + minutes * 60000 }
+  const lastTick = start + minutes * 60000
+  for (const p of pets) if (!isGrown(p, world.lastTick) && isGrown(p, lastTick)) note = `${p.name} 長大了！`
+  return { ...world, pets, note, lastTick }
 }
 
 type Action = 'feed' | 'pet' | 'play' | 'sleep'
@@ -258,6 +277,63 @@ export function cheer(world: World): World {
   return { ...world, pets, note: '測試通過，大家都很開心！' }
 }
 
+// --- Pets meeting each other ------------------------------------------------
+
+export type Encounter = { kind: 'play' | 'swat' | 'sniff'; a: string; b: string; until: number }
+
+const MEET_DISTANCE = 3
+const MEET_FRAMES = 6
+export const MEET_COOLDOWN = 20
+
+/** Whether a pet is free to meet another: awake, not busy, not reacting to the work. */
+function canMeet(p: Pet, now: number): boolean {
+  return mood(p, now) === 'idle'
+}
+
+/**
+ * The first pair standing within a few columns of each other, both free, meets
+ * with some luck: a cat and a dog may play, swat or sniff; two of a kind play
+ * or sniff. `at` maps pet id to its column.
+ */
+export function meet(pets: Pet[], at: ReadonlyMap<string, number>, now: number, frame: number, rand: () => number): Encounter | null {
+  for (let i = 0; i < pets.length; i++) {
+    for (let j = i + 1; j < pets.length; j++) {
+      const a = pets[i]!, b = pets[j]!
+      const xa = at.get(a.id), xb = at.get(b.id)
+      if (xa === undefined || xb === undefined || Math.abs(xa - xb) > MEET_DISTANCE) continue
+      if (!canMeet(a, now) || !canMeet(b, now)) continue
+      if (rand() > 0.15) return null
+      const mixed = a.kind !== b.kind
+      const roll = rand()
+      const kind = mixed ? (roll < 0.4 ? 'play' : roll < 0.7 ? 'swat' : 'sniff') : roll < 0.5 ? 'play' : 'sniff'
+      // The cat does the swatting.
+      const [first, second] = kind === 'swat' && b.kind === 'cat' ? [b, a] : [a, b]
+      return { kind, a: first.id, b: second.id, until: frame + MEET_FRAMES }
+    }
+  }
+  return null
+}
+
+/** What a pet shows while meeting: both hold still with a bubble. */
+export function encounterOverlay(e: Encounter | null, id: string, frame: number): Overlay | undefined {
+  if (!e || frame >= e.until || (id !== e.a && id !== e.b)) return undefined
+  if (e.kind === 'play') return { hold: 'still', bubble: frame % 2 === 0 ? 'fun!' : '!' }
+  if (e.kind === 'swat') return { hold: 'still', bubble: id === e.a ? 'paw!' : '!!' }
+  return { hold: 'still', bubble: '..?' }
+}
+
+/** Applies a meeting to the world: playing together cheers both up; every meeting gets a note. */
+export function befriend(world: World, e: Encounter): World {
+  const a = world.pets.find(p => p.id === e.a), b = world.pets.find(p => p.id === e.b)
+  if (!a || !b) return world
+  if (e.kind === 'play') {
+    const pets = world.pets.map(p => (p.id === a.id || p.id === b.id ? { ...p, fun: clamp(p.fun + 5) } : p))
+    return { ...world, pets, note: `${a.name} 和 ${b.name} 玩在一起！` }
+  }
+  if (e.kind === 'swat') return { ...world, note: `${a.name} 拍了 ${b.name} 一下` }
+  return { ...world, note: `${a.name} 和 ${b.name} 互相嗅嗅` }
+}
+
 export type Mood = 'sleep' | 'eat' | 'play' | 'love' | 'sad' | 'idle'
 
 export function mood(p: Pet, now: number): Mood {
@@ -334,6 +410,68 @@ const DOG_ART: Record<string, string[]> = {
   ],
 }
 
+const KITTEN_ART: Record<string, string[]> = {
+  walkA: [
+    String.raw`        /\_/\ `,
+    String.raw`   .---( FACE )`,
+    String.raw`  ~(    > ^ < `,
+    String.raw`    ` + '`' + String.raw`-/-/-\-\-' `,
+    String.raw`     / /   \ \  `,
+  ],
+  walkB: [
+    String.raw`        /\_/\ `,
+    String.raw`   .---( FACE )`,
+    String.raw`  ~(    > ^ < `,
+    String.raw`    ` + '`' + String.raw`-|-|-|-|-' `,
+    String.raw`      | |  | |  `,
+  ],
+  sit: [
+    String.raw`      /\_/\  `,
+    String.raw`     ( FACE ) `,
+    String.raw`     (> ^ <)  `,
+    String.raw`     /|   |\ `,
+    String.raw`    (_|___|_)~`,
+  ],
+  sleep: [
+    String.raw`            ZZ`,
+    String.raw`     .---./\_/\ `,
+    String.raw`  ~ (     FACE )`,
+    String.raw`     ` + '`' + String.raw`----'---'`,
+    '',
+  ],
+}
+
+const PUPPY_ART: Record<string, string[]> = {
+  walkA: [
+    String.raw`           __    `,
+    String.raw`   \______/ E\___ `,
+    String.raw`    (        ____)`,
+    String.raw`     \_ ____ /    `,
+    String.raw`     /_/   \_\    `,
+  ],
+  walkB: [
+    String.raw`           __    `,
+    String.raw`   \______/ E\___ `,
+    String.raw`    (        ____)`,
+    String.raw`     \_ ____ /    `,
+    String.raw`      |_|  |_|    `,
+  ],
+  sit: [
+    String.raw`      __     `,
+    String.raw`     / E\___ `,
+    String.raw`    /   ___) `,
+    String.raw`   /  _/     `,
+    String.raw`  (__/_|_| ~ `,
+  ],
+  sleep: [
+    String.raw`             ZZ`,
+    String.raw`    _______ __  `,
+    String.raw` ~ (      (E  \___`,
+    String.raw`    ` + '`' + String.raw`-----------'`,
+    '',
+  ],
+}
+
 export const ART_WIDTH = 24
 export const ART_HEIGHT = 5
 
@@ -393,7 +531,8 @@ export function stepWalker(w: Walker, p: Pet, now: number, frame: number, room: 
 
 export function sprite(p: Pet, now: number, frame: number, right = true, resting = false, overlay?: Overlay): string[] {
   const m = mood(p, now)
-  const art = p.kind === 'cat' ? CAT_ART : DOG_ART
+  const grown = isGrown(p, now)
+  const art = p.kind === 'cat' ? (grown ? CAT_ART : KITTEN_ART) : grown ? DOG_ART : PUPPY_ART
   const reacting = overlay !== undefined && (m === 'idle' || m === 'play')
   const sitting = m === 'love' || m === 'eat' || m === 'sad' || resting || (reacting && overlay.hold === 'still')
   const pose = m === 'sleep' ? 'sleep' : sitting ? 'sit' : frame % 2 === 0 ? 'walkA' : 'walkB'

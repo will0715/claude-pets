@@ -7,7 +7,7 @@ test('adopt and play from the pane on terminal and desktop', async ($, on) => {
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'pets', surface, component: 'Pane', props: { id: 'pets', title: 'Pets' }, requestId: 'pets', viewport: { columns: 50, rows: 30 } })
     await ui.press({ key: 'cat' })
-    expect(await ui.find({ type: 'Text', text: /咪咪/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /咪咪（幼貓）/ })).toBeDefined()
     await ui.press({ key: 'play' })
     expect(await ui.find({ type: 'Text', text: /毛線球/ })).toBeDefined()
     await ui.press({ key: 'rename' })
