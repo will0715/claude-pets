@@ -1,9 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
-import type { Reaction, World } from '../types'
+import type { Leader, Reaction, World } from '../types'
 import type { Encounter, Walker } from './logic'
-import { act, adopt, merge, parseCommand, rename, USAGE, ART_WIDTH, bar, cycle, befriend, cheer, decay, emptyWorld, encounterOverlay, fit, isTestCommand, meet, MEET_COOLDOWN, migrate, stageName, newWalker, NO_REACTION, overlayFor, react, release, sprite, stepWalker, toyLine } from './logic'
+import { absenceSummary, act, adopt, formatEvent, merge, parseCommand, recentEvents, rename, USAGE, ART_WIDTH, bar, cycle, befriend, cheer, claimLeader, decay, emptyWorld, encounterOverlay, fit, isTestCommand, meet, MEET_COOLDOWN, migrate, stageName, newWalker, NO_REACTION, overlayFor, react, release, sprite, stepWalker, toyLine } from './logic'
 
 const PANE = 'pets'
 const STORE_KEY = 'world'
@@ -15,6 +15,9 @@ const walkers = new Map<string, Walker>()
 // The meeting going on, if any, and the frame after which the next may start.
 let encounter: Encounter | null = null
 let nextMeet = 0
+// Every open session runs the frame timer; only the leader rolls encounters,
+// or N sessions would make the pets meet N times as often.
+let isLeader = false
 
 // Every change starts from the store, so one session's actions are not
 // overwritten by another session's older copy.
@@ -23,6 +26,17 @@ async function change($: EngineInterface, fn: (w: World, now: number) => World) 
   const saved = (await $.store.get(STORE_KEY)) as World | undefined
   const w = await update($, world, cur => fn(decay(migrate(merge(saved, cur), now), now), now))
   await $.store.set(STORE_KEY, { ...w, frame: 0 })
+}
+
+async function heartbeat($: EngineInterface, me: string) {
+  const claim = claimLeader((await $.store.get('leader')) as Leader | undefined, me, await $.clock.now())
+  if (!claim) {
+    isLeader = false
+    return
+  }
+  await $.store.set('leader', claim)
+  // Two sessions that both claimed a stale record converge: the later write wins.
+  isLeader = ((await $.store.get('leader')) as Leader | undefined)?.id === me
 }
 
 async function petsView($: EngineInterface, e: RenderInput<'Pane'>, bodyColumns: number) {
@@ -66,6 +80,9 @@ async function petsView($: EngineInterface, e: RenderInput<'Pane'>, bodyColumns:
           )
         })}
         <Text color="cyan" wrap="truncate-end">{w.note}</Text>
+        {recentEvents(w, 2).map(ev => (
+          <Text dimColor wrap="truncate-end">{formatEvent(ev)}</Text>
+        ))}
         {isRenaming && current && Input && (
           <Input
             key="name"
@@ -75,7 +92,7 @@ async function petsView($: EngineInterface, e: RenderInput<'Pane'>, bodyColumns:
             submitLabel="改名"
             autoFocus
             onSubmit={(value: string) => {
-              void change($, x => rename(x, value))
+              void change($, (x, n) => rename(x, value, n))
               void update($, renaming, () => false)
             }}
           />
@@ -91,7 +108,7 @@ async function petsView($: EngineInterface, e: RenderInput<'Pane'>, bodyColumns:
           <Button key="cat" hotkey="c" plain onPress={() => void change($, (x, n) => adopt(x, 'cat', n))}>領養貓</Button>
           <Button key="dog" hotkey="d" plain onPress={() => void change($, (x, n) => adopt(x, 'dog', n))}>領養狗</Button>
           {Input && <Button key="rename" hotkey="r" plain onPress={() => void update($, renaming, on => !on)}>改名</Button>}
-          <Button key="bye" hotkey="x" plain dimColor onPress={() => void change($, x => release(x))}>送養</Button>
+          <Button key="bye" hotkey="x" plain dimColor onPress={() => void change($, (x, n) => release(x, n))}>送養</Button>
         </Box>
       </Box>
     )
@@ -102,15 +119,25 @@ export const register: Register = on => {
     const result = await next(e)
     const now = await $.clock.now()
     const saved = (await $.store.get(STORE_KEY)) as World | undefined
-    await update($, world, () => decay(migrate(saved ?? emptyWorld(now), now), now))
+    const decayed = decay(migrate(saved ?? emptyWorld(now), now), now)
+    if (saved && now - saved.lastTick > 30 * 60000) {
+      const summary = absenceSummary(decayed.events, saved.lastTick)
+      if (summary !== '') $.ui.toast(summary)
+    }
+    await update($, world, () => decayed)
 
     await update($, renaming, () => false)
 
-    await $.command.register({ name: 'pets', description: '打開寵物 pane，或直接下指令：feed、pet、play、sleep、next、cat、dog、release、rename；最後加寵物名可指定對象', argumentHint: '[指令] [寵物名]' })
+    await $.command.register({ name: 'pets', description: '打開寵物 pane，或直接下指令：feed、pet、play、sleep、next、cat、dog、release、rename、log（寵物日誌）；最後加寵物名可指定對象', argumentHint: '[指令|log] [寵物名]' })
     void $.ui.open({ id: PANE, title: 'Pets' })
+
+    const me = await $.session.id()
+    await heartbeat($, me)
+    $.clock.every(2000, () => heartbeat($, me))
 
     $.clock.every(800, async () => {
       const w = await update($, world, cur => ({ ...cur, frame: cur.frame + 1 }))
+      if (!isLeader) return
       // Pets standing together may meet, once the last meeting has worn off.
       if (w.frame < nextMeet || w.pets.length < 2) return
       const at = new Map([...walkers].map(([id, k]) => [id, Math.round(k.x)]))
@@ -119,7 +146,7 @@ export const register: Register = on => {
       if (!met) return
       encounter = met
       nextMeet = met.until + MEET_COOLDOWN
-      await change($, x => befriend(x, met))
+      await change($, (x, n) => befriend(x, met, n))
     })
     $.clock.every(60000, () => {
       void change($, w => w)
@@ -127,9 +154,20 @@ export const register: Register = on => {
     return result
   })
 
+  on('session.end', async ($, e, next) => {
+    if (isLeader) await $.store.delete('leader')
+    return next(e)
+  })
+
   on('command.run', { command: 'pets' }, async ($, e) => {
     const step = parseCommand(e.args)
     if (step === null) return { text: USAGE }
+    if (step === 'log') {
+      // Sync with the store first so the log includes what other sessions recorded.
+      await change($, w => w)
+      const events = recentEvents(await read($, world), 20)
+      return { text: events.length > 0 ? events.map(formatEvent).join('\n') : '還沒有任何紀錄' }
+    }
     if (step !== 'open') {
       await change($, step)
       return { text: (await read($, world)).note }

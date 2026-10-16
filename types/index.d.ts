@@ -15,13 +15,21 @@ export type Pet = {
   bornAt?: number
 }
 
+/** Something that happened, for the log; `at` is epoch ms. */
+export type PetEvent = { at: number; text: string }
+
 export type World = {
   pets: Pet[]
   selected: number
   frame: number
   note: string
   lastTick: number
+  /** Oldest first, at most `MAX_EVENTS`. */
+  events: PetEvent[]
 }
+
+/** The session that rolls pet encounters, and its last heartbeat (epoch ms). */
+export type Leader = { id: string; beat: number }
 
 /** How the pets react to the session's work; drawing only, never stored. */
 export type Reaction = {

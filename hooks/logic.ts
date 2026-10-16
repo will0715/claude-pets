@@ -1,4 +1,4 @@
-import type { Kind, Pet, Reaction, World } from '../types'
+import type { Kind, Leader, Pet, PetEvent, Reaction, World } from '../types'
 
 export const MAX_PETS = 4
 const CAT_NAMES = ['咪咪', '橘子', '麻糬', '布丁', '芝麻', '小花']
@@ -7,7 +7,40 @@ const DOG_NAMES = ['旺財', '豆豆', '可樂', '饅頭', '黑糖', '小白']
 const clamp = (n: number) => Math.max(0, Math.min(100, Math.round(n)))
 
 export function emptyWorld(now: number): World {
-  return { pets: [], selected: 0, frame: 0, note: '按 c 領養貓、d 領養狗', lastTick: now }
+  return { pets: [], selected: 0, frame: 0, note: '按 c 領養貓、d 領養狗', lastTick: now, events: [] }
+}
+
+export const MAX_EVENTS = 30
+
+/** Something happened: show it as the note and keep it in the log. */
+export function record(world: World, at: number, text: string): World {
+  return { ...world, note: text, events: [...world.events, { at, text }].slice(-MAX_EVENTS) }
+}
+
+const pad = (n: number) => String(n).padStart(2, '0')
+
+export function formatEvent(e: PetEvent): string {
+  const d = new Date(e.at)
+  return `${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())} ${e.text}`
+}
+
+export function recentEvents(world: World, n: number): PetEvent[] {
+  return n > 0 ? world.events.slice(-n) : []
+}
+
+/** One sentence on what the pets did by themselves after `since`, or `''`. */
+export function absenceSummary(events: PetEvent[], since: number): string {
+  const after = events.filter(e => e.at > since)
+  const count = (...marks: string[]) => after.filter(e => marks.some(m => e.text.includes(m))).length
+  const fed = count('自己去吃飯'), napped = count('自己去睡覺'), met = count('玩在一起', '拍了', '互相嗅嗅')
+  const grown = after.filter(e => e.text.endsWith(' 長大了！')).map(e => e.text.slice(0, -' 長大了！'.length))
+  const parts = [
+    fed > 0 ? `自己吃了 ${fed} 次飯` : '',
+    napped > 0 ? `自己睡了 ${napped} 次` : '',
+    met > 0 ? `互動 ${met} 次` : '',
+    grown.length > 0 ? `${grown.join('、')} 長大了` : '',
+  ].filter(Boolean)
+  return parts.length > 0 ? `你不在的時候：${parts.join('、')}` : ''
 }
 
 export function adopt(world: World, kind: Kind, now: number): World {
@@ -19,15 +52,16 @@ export function adopt(world: World, kind: Kind, now: number): World {
     id: `${kind}-${now}`, kind, name, full: 80, fun: 80, energy: 80,
     sleepingUntil: 0, playingUntil: 0, heartsUntil: now + 3000, eatingUntil: 0, bornAt: now,
   }
-  return { ...world, pets: [...world.pets, pet], selected: world.pets.length, note: `${name} 來到你家了！` }
+  return record({ ...world, pets: [...world.pets, pet], selected: world.pets.length }, now, `${name} 來到你家了！`)
 }
 
 export const GROWN_AFTER_DAYS = 7
 
-/** Pets saved before `bornAt` existed start as babies from now. */
+/** Pets saved before `bornAt` existed start as babies from now; saves before the log start with an empty one. */
 export function migrate(world: World, now: number): World {
-  if (world.pets.every(p => p.bornAt !== undefined)) return world
-  return { ...world, pets: world.pets.map(p => (p.bornAt === undefined ? { ...p, bornAt: now } : p)) }
+  const events = world.events ?? []
+  if (world.events && world.pets.every(p => p.bornAt !== undefined)) return world
+  return { ...world, events, pets: world.pets.map(p => (p.bornAt === undefined ? { ...p, bornAt: now } : p)) }
 }
 
 export function isGrown(p: Pet, now: number): boolean {
@@ -81,7 +115,7 @@ export function decay(world: World, now: number): World {
   const minutes = Math.min(elapsed, 720)
   const start = now - ((now - world.lastTick) % 60000) - minutes * 60000
   let pets = world.pets
-  let note = world.note
+  let out = world
   for (let m = 1; m <= minutes; m++) {
     const t = start + m * 60000
     pets = pets.map(p => {
@@ -93,13 +127,13 @@ export function decay(world: World, now: number): World {
         energy: clamp(asleep ? p.energy + 6 : p.energy - 1),
       }
       const lived = live(drifted, t)
-      if (lived.note) note = lived.note
+      if (lived.note) out = record(out, t, lived.note)
       return lived.pet
     })
   }
   const lastTick = start + minutes * 60000
-  for (const p of pets) if (!isGrown(p, world.lastTick) && isGrown(p, lastTick)) note = `${p.name} 長大了！`
-  return { ...world, pets, note, lastTick }
+  for (const p of pets) if (!isGrown(p, world.lastTick) && isGrown(p, lastTick)) out = record(out, lastTick, `${p.name} 長大了！`)
+  return { ...out, pets, lastTick }
 }
 
 type Action = 'feed' | 'pet' | 'play' | 'sleep'
@@ -113,7 +147,7 @@ export function act(world: World, action: Action, now: number): World {
   let next: Pet = p
   let note = ''
   if (action === 'feed') {
-    if (p.full >= 95) note = `${p.name} 吃不下了`
+    if (p.full >= 95) return { ...world, note: `${p.name} 吃不下了` }
     else {
       next = { ...p, full: clamp(p.full + 30), eatingUntil: now + 3000 }
       note = p.kind === 'cat' ? `${p.name} 吃了小魚乾` : `${p.name} 啃了骨頭`
@@ -122,7 +156,7 @@ export function act(world: World, action: Action, now: number): World {
     next = { ...p, fun: clamp(p.fun + 10), heartsUntil: now + 3000 }
     note = p.kind === 'cat' ? `${p.name} 呼嚕呼嚕` : `${p.name} 搖尾巴`
   } else if (action === 'play') {
-    if (p.energy < 15) note = `${p.name} 太累了，讓牠睡一下`
+    if (p.energy < 15) return { ...world, note: `${p.name} 太累了，讓牠睡一下` }
     else {
       next = { ...p, fun: clamp(p.fun + 25), energy: clamp(p.energy - 15), full: clamp(p.full - 5), playingUntil: now + 6000 }
       note = `${p.name} ${TOYS[p.kind][toyOf(next)]!.note}`
@@ -137,7 +171,7 @@ export function act(world: World, action: Action, now: number): World {
     }
   }
   const pets = world.pets.map((one, i) => (i === world.selected ? next : one))
-  return { ...world, pets, note }
+  return record({ ...world, pets }, now, note)
 }
 
 export function cycle(world: World): World {
@@ -148,7 +182,7 @@ export function cycle(world: World): World {
 
 export const MAX_NAME = 12
 
-export function rename(world: World, raw: string): World {
+export function rename(world: World, raw: string, now: number): World {
   const p = world.pets[world.selected]
   if (!p) return { ...world, note: '還沒有寵物，按 c 或 d 領養一隻' }
   const name = raw.trim()
@@ -159,14 +193,14 @@ export function rename(world: World, raw: string): World {
     return { ...world, note: `已經有一隻叫 ${name} 了` }
   }
   const pets = world.pets.map((one, i) => (i === world.selected ? { ...one, name } : one))
-  return { ...world, pets, note: `${p.name} 改名叫 ${name} 了` }
+  return record({ ...world, pets }, now, `${p.name} 改名叫 ${name} 了`)
 }
 
-export function release(world: World): World {
+export function release(world: World, now: number): World {
   const p = world.pets[world.selected]
   if (!p) return world
   const pets = world.pets.filter((_, i) => i !== world.selected)
-  return { ...world, pets, selected: 0, note: `${p.name} 去找新家了，掰掰` }
+  return record({ ...world, pets, selected: 0 }, now, `${p.name} 去找新家了，掰掰`)
 }
 
 type Step = (world: World, now: number) => World
@@ -177,14 +211,14 @@ const COMMANDS: Record<string, Step> = {
   play: (w, n) => act(w, 'play', n),
   sleep: (w, n) => act(w, 'sleep', n),
   next: w => cycle(w),
-  release: w => release(w),
+  release: (w, n) => release(w, n),
 }
 const ALIASES: Record<string, string> = {
   餵食: 'feed', 摸摸: 'pet', 玩耍: 'play', 睡覺: 'sleep', 換一隻: 'next',
   領養貓: 'cat', 領養狗: 'dog', 送養: 'release', 改名: 'rename',
 }
 
-export const USAGE = '用法：/pets [feed | pet | play | sleep | next | release] [寵物名]、/pets cat|dog [名字]、/pets rename <新名字> [寵物名]'
+export const USAGE = '用法：/pets [feed | pet | play | sleep | next | release] [寵物名]、/pets cat|dog [名字]、/pets rename <新名字> [寵物名]、/pets log'
 
 /** Selects the pet called `name`; `null` when there is none. */
 function select(world: World, name: string): World | null {
@@ -195,32 +229,33 @@ function select(world: World, name: string): World | null {
 const missing = (world: World, name: string): World => ({ ...world, note: `沒有叫 ${name} 的寵物` })
 
 /**
- * `/pets <args>`: the step to apply, `'open'` for no args, or `null` when unknown.
+ * `/pets <args>`: the step to apply, `'open'` for no args, `'log'` for the log, or `null` when unknown.
  * A pet's name after the verb picks that pet (and selects it) instead of the selected one.
  */
-export function parseCommand(args: string): Step | 'open' | null {
+export function parseCommand(args: string): Step | 'open' | 'log' | null {
   const [head = '', ...rest] = args.trim().split(/\s+/)
   if (head === '') return 'open'
   const verb = ALIASES[head] ?? head.toLowerCase()
   const target = rest.join(' ')
+  if (verb === 'log') return 'log'
 
   if (verb === 'rename') {
-    return w => {
+    return (w, n) => {
       // `rename <新名字> [寵物名]`: the longest tail of words naming a pet is the target.
       for (let cut = 1; cut < rest.length; cut++) {
         const picked = select(w, rest.slice(cut).join(' '))
-        if (picked) return rename(picked, rest.slice(0, cut).join(' '))
+        if (picked) return rename(picked, rest.slice(0, cut).join(' '), n)
       }
-      return rename(w, target)
+      return rename(w, target, n)
     }
   }
   if (verb === 'cat' || verb === 'dog') {
     return (w, n) => {
       const born = adopt(w, verb, n)
       if (target === '' || born.pets.length === w.pets.length) return born
-      const named = rename(born, target)
-      // A refused name keeps the default one and says why.
-      return named.pets[named.selected]?.name === target ? { ...named, note: `${target} 來到你家了！` } : named
+      const named = rename(born, target, n)
+      // A refused name keeps the default one and says why; an accepted one logs a single arrival under it.
+      return named.pets[named.selected]?.name === target ? record({ ...named, events: w.events }, n, `${target} 來到你家了！`) : named
     }
   }
   const step = COMMANDS[verb]
@@ -323,15 +358,23 @@ export function encounterOverlay(e: Encounter | null, id: string, frame: number)
 }
 
 /** Applies a meeting to the world: playing together cheers both up; every meeting gets a note. */
-export function befriend(world: World, e: Encounter): World {
+export function befriend(world: World, e: Encounter, now: number): World {
   const a = world.pets.find(p => p.id === e.a), b = world.pets.find(p => p.id === e.b)
   if (!a || !b) return world
   if (e.kind === 'play') {
     const pets = world.pets.map(p => (p.id === a.id || p.id === b.id ? { ...p, fun: clamp(p.fun + 5) } : p))
-    return { ...world, pets, note: `${a.name} 和 ${b.name} 玩在一起！` }
+    return record({ ...world, pets }, now, `${a.name} 和 ${b.name} 玩在一起！`)
   }
-  if (e.kind === 'swat') return { ...world, note: `${a.name} 拍了 ${b.name} 一下` }
-  return { ...world, note: `${a.name} 和 ${b.name} 互相嗅嗅` }
+  if (e.kind === 'swat') return record(world, now, `${a.name} 拍了 ${b.name} 一下`)
+  return record(world, now, `${a.name} 和 ${b.name} 互相嗅嗅`)
+}
+
+export const LEADER_TTL = 5000
+
+/** The record `me` writes to lead: when none leads, `me` already does, or the leader's beat is `LEADER_TTL` or more old; else null. */
+export function claimLeader(current: Leader | undefined, me: string, now: number): Leader | null {
+  if (current && current.id !== me && now - current.beat < LEADER_TTL) return null
+  return { id: me, beat: now }
 }
 
 export type Mood = 'sleep' | 'eat' | 'play' | 'love' | 'sad' | 'idle'

@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import type { Pet } from '../types'
-import { act, adopt, ART_WIDTH, HUNGRY, TIRED, cycle, release, decay, emptyWorld, befriend, cheer, encounterOverlay, fit, gait, GROWN_AFTER_DAYS, isGrown, meet, migrate, stageName, isTestCommand, merge, mood, need, newWalker, NO_REACTION, overlayFor, parseCommand, react, rename, sprite, stepWalker, TOYS, toyLine, toyOf } from './logic'
+import { absenceSummary, act, adopt, ART_WIDTH, formatEvent, MAX_EVENTS, record, recentEvents, HUNGRY, TIRED, cycle, release, decay, emptyWorld, befriend, cheer, claimLeader, encounterOverlay, LEADER_TTL, fit, gait, GROWN_AFTER_DAYS, isGrown, meet, migrate, stageName, isTestCommand, merge, mood, need, newWalker, NO_REACTION, overlayFor, parseCommand, react, rename, sprite, stepWalker, TOYS, toyLine, toyOf } from './logic'
 
 test('adopt, feed, play, sleep', () => {
   let w = adopt(emptyWorld(0), 'cat', 0)
@@ -57,13 +57,13 @@ test('pets eat and nap on their own', () => {
 
 test('rename the selected pet', () => {
   let w = adopt(adopt(emptyWorld(0), 'cat', 0), 'dog', 0)
-  w = rename(w, '  阿福 ')
+  w = rename(w, '  阿福 ', 0)
   expect(w.pets[1]?.name).toBe('阿福')
   expect(w.note).toContain('改名叫 阿福')
-  expect(rename(w, '咪咪').note).toContain('已經有一隻叫 咪咪')
-  expect(rename(w, '   ').pets[1]?.name).toBe('阿福')
-  expect(rename(w, 'x'.repeat(13)).note).toContain('最多')
-  expect(rename(emptyWorld(0), '阿福').note).toContain('還沒有寵物')
+  expect(rename(w, '咪咪', 0).note).toContain('已經有一隻叫 咪咪')
+  expect(rename(w, '   ', 0).pets[1]?.name).toBe('阿福')
+  expect(rename(w, 'x'.repeat(13), 0).note).toContain('最多')
+  expect(rename(emptyWorld(0), '阿福', 0).note).toContain('還沒有寵物')
 })
 
 test('command line args map to the pane actions', () => {
@@ -130,7 +130,7 @@ test('merge takes the stored world and keeps the session selection', () => {
   expect(w.pets[w.selected]?.name).toBe('咪咪')
   expect([w.frame, w.note]).toEqual([7, 'mine'])
   // The selected pet was released elsewhere: fall back to the first.
-  expect(merge(release({ ...theirs, selected: 1 }), { ...base, selected: 1 }).selected).toBe(0)
+  expect(merge(release({ ...theirs, selected: 1 }, 0), { ...base, selected: 1 }).selected).toBe(0)
   expect(merge(undefined, mine)).toBe(mine)
 })
 
@@ -263,12 +263,12 @@ test('pets standing together meet', () => {
   expect(encounterOverlay(swat, dog.id, 100)?.bubble).toBe('!!')
   expect(encounterOverlay(swat, cat2.id, 100)).toBeUndefined()
   expect(encounterOverlay(swat, cat.id, 106)).toBeUndefined()
-  expect(befriend(w, swat!).note).toBe('咪咪 拍了 旺財 一下')
+  expect(befriend(w, swat!, 0).note).toBe('咪咪 拍了 旺財 一下')
 
   // Two cats: play cheers both up.
   const play = meet([cat, cat2], new Map([[cat.id, 5], [cat2.id, 5]]), t, 0, () => 0.1)!
   expect(play.kind).toBe('play')
-  const after = befriend(w, play)
+  const after = befriend(w, play, 0)
   expect(after.pets.map(p => p.fun)).toEqual([85, 80, 85])
   expect(after.note).toBe('咪咪 和 橘子 玩在一起！')
   expect(encounterOverlay(play, cat.id, 0)?.hold).toBe('still')
@@ -303,4 +303,105 @@ test('pets start small and grow up after a week', () => {
   }
   expect(sprite(cat, 10_000, 0).join('')).not.toBe(sprite(cat, 8 * day, 0).join(''))
   expect(sprite(dog, 10_000, 0).join('\n')).toContain('o\\___')
+})
+
+test('things that happen go in the log; refusals do not', () => {
+  const texts = (w: { events: { text: string }[] }) => w.events.map(e => e.text)
+  let w = adopt(emptyWorld(0), 'cat', 1000)
+  expect(w.events).toEqual([{ at: 1000, text: '咪咪 來到你家了！' }])
+  w = act(w, 'feed', 2000)
+  expect(w.events.at(-1)).toEqual({ at: 2000, text: '咪咪 吃了小魚乾' })
+  w = rename(w, '阿福', 3000)
+  expect(w.events.at(-1)).toEqual({ at: 3000, text: '咪咪 改名叫 阿福 了' })
+  expect(w.events.length).toBe(3)
+
+  // Refusals and selection changes only set the note.
+  const full = act(w, 'feed', 4000)
+  expect(full.note).toContain('吃不下了')
+  expect(full.events).toEqual(w.events)
+  expect(rename(w, '  ', 5000).events).toEqual(w.events)
+  expect(act(act(w, 'sleep', 5000), 'feed', 5001).events.length).toBe(4)
+  const two = adopt(w, 'dog', 6000)
+  expect(cycle(two).events).toEqual(two.events)
+
+  w = release(w, 7000)
+  expect(w.events.at(-1)).toEqual({ at: 7000, text: '阿福 去找新家了，掰掰' })
+  expect(texts(w)).toEqual(['咪咪 來到你家了！', '咪咪 吃了小魚乾', '咪咪 改名叫 阿福 了', '阿福 去找新家了，掰掰'])
+
+  // Adopting under a name logs one arrival under that name.
+  const named = parseCommand('cat 小黑')
+  if (typeof named !== 'function') throw new Error('not a step')
+  expect(texts(named(emptyWorld(0), 10))).toEqual(['小黑 來到你家了！'])
+})
+
+test('what pets do on their own is logged at the minute it happened', () => {
+  const w = decay(adopt(emptyWorld(0), 'dog', 0), 61 * 60000)
+  expect(w.events).toEqual([
+    { at: 0, text: '旺財 來到你家了！' },
+    { at: 56 * 60000, text: '旺財 肚子餓，自己去吃飯了' },
+    { at: 61 * 60000, text: '旺財 累了，自己去睡覺（10 分鐘）' },
+  ])
+
+  const day = 86400000
+  const grown = decay({ ...adopt(emptyWorld(0), 'dog', 0), lastTick: 7 * day - 60000 }, 7 * day)
+  expect(grown.events.at(-1)).toEqual({ at: 7 * day, text: '旺財 長大了！' })
+})
+
+test('meetings are logged', () => {
+  const w = adopt(adopt(emptyWorld(0), 'cat', 0), 'dog', 1)
+  const [cat, dog] = w.pets as [Pet, Pet]
+  const after = befriend(w, { kind: 'sniff', a: cat.id, b: dog.id, until: 6 }, 5000)
+  expect(after.events.at(-1)).toEqual({ at: 5000, text: '咪咪 和 旺財 互相嗅嗅' })
+})
+
+test('the log keeps the newest entries', () => {
+  let w = emptyWorld(0)
+  for (let i = 0; i < 35; i++) w = record(w, i, `e${i}`)
+  expect(w.events.length).toBe(MAX_EVENTS)
+  expect(w.events[0]).toEqual({ at: 5, text: 'e5' })
+  expect(w.events.at(-1)).toEqual({ at: 34, text: 'e34' })
+  expect(recentEvents(w, 2).map(e => e.text)).toEqual(['e33', 'e34'])
+})
+
+test('saves from before the log get an empty one', () => {
+  const { events: _, ...old } = adopt(emptyWorld(0), 'cat', 0)
+  expect(migrate(old as ReturnType<typeof emptyWorld>, 500).events).toEqual([])
+  const current = adopt(emptyWorld(0), 'cat', 0)
+  expect(migrate(current, 500)).toBe(current)
+})
+
+test('log lines show local month, day and time, zero-padded', () => {
+  const at = new Date(2026, 9, 16, 9, 5).getTime()
+  expect(formatEvent({ at, text: '咪咪 吃了小魚乾' })).toBe('10/16 09:05 咪咪 吃了小魚乾')
+  expect(formatEvent({ at: new Date(2026, 0, 2, 3, 4).getTime(), text: 'x' })).toBe('01/02 03:04 x')
+})
+
+test('the absence summary counts what happened after you left', () => {
+  const events = [
+    { at: 1, text: '咪咪 肚子餓，自己去吃飯了' },
+    { at: 10, text: '咪咪 肚子餓，自己去吃飯了' },
+    { at: 11, text: '旺財 肚子餓，自己去吃飯了' },
+    { at: 12, text: '旺財 累了，自己去睡覺（10 分鐘）' },
+    { at: 13, text: '咪咪 拍了 旺財 一下' },
+    { at: 14, text: '咪咪 吃了小魚乾' },
+    { at: 15, text: '旺財 長大了！' },
+  ]
+  expect(absenceSummary(events, 5)).toBe('你不在的時候：自己吃了 2 次飯、自己睡了 1 次、互動 1 次、旺財 長大了')
+  expect(absenceSummary(events, 15)).toBe('')
+  expect(absenceSummary([{ at: 20, text: '咪咪 吃了小魚乾' }], 0)).toBe('')
+})
+
+test('/pets log is its own command', () => {
+  expect(parseCommand('log')).toBe('log')
+})
+
+test('a session claims leadership when none leads, renews its own, and takes over a stale one', () => {
+  expect(claimLeader(undefined, 'a', 1000)).toEqual({ id: 'a', beat: 1000 })
+  expect(claimLeader({ id: 'a', beat: 900 }, 'a', 1000)).toEqual({ id: 'a', beat: 1000 })
+  expect(claimLeader({ id: 'b', beat: 1000 }, 'a', 1000 + LEADER_TTL - 1)).toBeNull()
+  expect(claimLeader({ id: 'b', beat: 1000 }, 'a', 1000 + LEADER_TTL + 1)).toEqual({ id: 'a', beat: 1000 + LEADER_TTL + 1 })
+})
+
+test('a leader whose beat is exactly LEADER_TTL old counts as stale', () => {
+  expect(claimLeader({ id: 'b', beat: 0 }, 'a', LEADER_TTL)).toEqual({ id: 'a', beat: LEADER_TTL })
 })
