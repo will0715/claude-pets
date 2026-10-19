@@ -1,4 +1,5 @@
-import type { Kind, Leader, Pet, PetEvent, Reaction, World } from '../types'
+import type { PromptOrigin } from 'claude-code'
+import type { Activity, Kind, Leader, Pet, PetEvent, Reaction, World } from '../types'
 
 export const MAX_PETS = 4
 const CAT_NAMES = ['咪咪', '橘子', '麻糬', '布丁', '芝麻', '小花']
@@ -52,18 +53,58 @@ export function adopt(world: World, kind: Kind, now: number): World {
   const name = names.find(n => !used.has(n)) ?? `${kind}${world.pets.length + 1}`
   const pet: Pet = {
     id: `${kind}-${now}`, kind, name, full: 80, fun: 80, energy: 80,
-    sleepingUntil: 0, playingUntil: 0, heartsUntil: now + 3000, eatingUntil: 0, bornAt: now,
+    sleepingUntil: 0, playingUntil: 0, heartsUntil: now + 3000, eatingUntil: 0, bornAt: now, bond: 0, bondAt: now,
   }
   return record({ ...world, pets: [...world.pets, pet], selected: world.pets.length }, now, `${name} 來到你家了！`)
 }
 
 export const GROWN_AFTER_DAYS = 7
 
-/** Pets saved before `bornAt` existed start as babies from now; saves before the log start with an empty one. */
+/**
+ * Pets saved before `bornAt` existed start as babies from now, and before the
+ * bond with none from now; saves before the log start with an empty one.
+ */
 export function migrate(world: World, now: number): World {
   const events = world.events ?? []
-  if (world.events && world.pets.every(p => p.bornAt !== undefined)) return world
-  return { ...world, events, pets: world.pets.map(p => (p.bornAt === undefined ? { ...p, bornAt: now } : p)) }
+  if (world.events && world.pets.every(p => p.bornAt !== undefined && p.bond !== undefined && p.bondAt !== undefined)) return world
+  return { ...world, events, pets: world.pets.map(p => ({ ...p, bornAt: p.bornAt ?? now, bond: p.bond ?? 0, bondAt: p.bondAt ?? now })) }
+}
+
+// --- Bond -----------------------------------------------------------------------
+
+/** Every bond rule in one place: what each interaction adds, and how it fades when left alone. */
+export const BOND_RULES = {
+  gain: { feed: 2, pet: 1, play: 3 } as Partial<Record<Action, number>>,
+  fadeAfterDays: 3,
+  fadePerDay: 5,
+}
+
+export type Perk = 'greet' | 'comfort'
+
+export const BOND_PERKS: { min: number; perk: Perk }[] = [{ min: 50, perk: 'greet' }, { min: 80, perk: 'comfort' }]
+
+export function hasPerk(p: Pet, perk: Perk): boolean {
+  return BOND_PERKS.some(x => x.perk === perk && (p.bond ?? 0) >= x.min)
+}
+
+/** Bond lost between ticks `from` and `to`: each whole day since `bondAt` crossed past the grace days. */
+function faded(p: Pet, from: number, to: number): Pet {
+  const { bond, bondAt } = p
+  if (bondAt === undefined || bond === undefined) return p
+  const day = (t: number) => Math.floor((t - bondAt) / DAY)
+  const days = day(to) - Math.max(day(from), BOND_RULES.fadeAfterDays)
+  return days > 0 ? { ...p, bond: clamp(bond - days * BOND_RULES.fadePerDay) } : p
+}
+
+/** Name, stage, age, trait and, once close, hearts: `貓貓（貓，11 天，貪吃，<3<3）`. */
+export function petLabel(p: Pet, now: number): string {
+  const hearts = '<3'.repeat(Math.floor((p.bond ?? 0) / 25))
+  return `${p.name}（${stageName(p, now)}，${ageLabel(p, now)}，${TRAITS[trait(p)].label}${hearts && '，' + hearts}）`
+}
+
+/** A close pet says hi for the first 3 s of a session. */
+export function greetOverlay(p: Pet, now: number, until: number): Overlay | undefined {
+  return now < until && hasPerk(p, 'greet') ? { hold: 'still', bubble: 'hi!' } : undefined
 }
 
 export function isGrown(p: Pet, now: number): boolean {
@@ -112,22 +153,34 @@ export function merge(saved: World | undefined, cur: World): World {
 
 export const HUNGRY = 25
 export const TIRED = 20
-const NAP_MINUTES = 10
+
+/** Night is 22:00 to 07:00 local time. */
+export function isNight(at: number): boolean {
+  const h = new Date(at).getHours()
+  return h >= 22 || h < 7
+}
 
 /**
  * What a pet does on its own at minute `t`: eats when hungry, naps when tired.
- * Returns the pet and a note when it did something.
+ * A sleeping pet cannot eat, so before a nap it eats if it would otherwise wake
+ * hungry. Returns the pet and a note for each thing it did, in order.
  */
-export function live(p: Pet, t: number): { pet: Pet; note?: string } {
-  if (p.sleepingUntil > t) return { pet: p }
-  if (p.full < HUNGRY) {
-    const pet = { ...p, full: clamp(p.full + 30), eatingUntil: t + 3000 }
-    return { pet, note: `${p.name} 肚子餓，自己去吃飯了` }
+export function live(p: Pet, t: number): { pet: Pet; notes: string[] } {
+  if (p.sleepingUntil > t) return { pet: p, notes: [] }
+  const { napExtra, fullDrop } = TRAITS[trait(p)]
+  const nap = p.energy < TIRED ? (isNight(t) ? 30 : 10) + napExtra : 0
+  const enough = HUNGRY + nap * fullDrop
+  let pet = p
+  const notes: string[] = []
+  if (p.full < enough) {
+    pet = { ...pet, full: clamp(Math.max(p.full + 30, enough)), eatingUntil: t + 3000 }
+    notes.push(`${p.name} 肚子餓，自己去吃飯了`)
   }
-  if (p.energy < TIRED) {
-    return { pet: { ...p, sleepingUntil: t + NAP_MINUTES * 60000 }, note: `${p.name} 累了，自己去睡覺（${NAP_MINUTES} 分鐘）` }
+  if (nap > 0) {
+    pet = { ...pet, sleepingUntil: t + nap * 60000 }
+    notes.push(`${p.name} 累了，自己去睡覺（${nap} 分鐘）`)
   }
-  return { pet: p }
+  return { pet, notes }
 }
 
 /**
@@ -145,14 +198,15 @@ export function decay(world: World, now: number): World {
     const t = start + m * 60000
     pets = pets.map(p => {
       const asleep = p.sleepingUntil > t - 60000
+      const { fullDrop, funDrop } = TRAITS[trait(p)]
       const drifted = {
         ...p,
-        full: clamp(p.full - 1),
-        fun: clamp(p.fun - 2),
+        full: clamp(p.full - fullDrop),
+        fun: clamp(p.fun - funDrop),
         energy: clamp(asleep ? p.energy + 6 : p.energy - 1),
       }
       const lived = live(drifted, t)
-      if (lived.note) out = record(out, t, lived.note)
+      for (const note of lived.notes) out = record(out, t, note)
       return lived.pet
     })
   }
@@ -162,6 +216,7 @@ export function decay(world: World, now: number): World {
     const months = ageMonths(p, lastTick)
     if (months > ageMonths(p, world.lastTick)) out = record(out, p.bornAt! + months * MONTH_DAYS * DAY, `${p.name} 滿 ${months} 個月了！`)
   }
+  pets = pets.map(p => faded(p, world.lastTick, lastTick))
   return { ...out, pets, lastTick }
 }
 
@@ -199,6 +254,8 @@ export function act(world: World, action: Action, now: number): World {
       note = `${p.name} 去睡覺了（5 分鐘）`
     }
   }
+  const gain = BOND_RULES.gain[action]
+  if (gain !== undefined) next = { ...next, bond: clamp((next.bond ?? 0) + gain), bondAt: now }
   const pets = world.pets.map((one, i) => (i === world.selected ? next : one))
   return record({ ...world, pets }, now, note)
 }
@@ -322,13 +379,14 @@ export function react(r: Reaction, event: WorkEvent, now: number): Reaction {
   }
 }
 
-export type Overlay = { hold: 'spin' | 'still'; bubble: string }
+/** `hold` is how the pet moves under the bubble: spins on the spot, stands still, or carries on as it was. */
+export type Overlay = { hold: 'spin' | 'still' | 'none'; bubble: string }
 
 /** What a pet shows for the reaction now, or nothing. `selected` pets alone take the oops. */
-export function overlayFor(r: Reaction, now: number, frame: number, selected: boolean): Overlay | undefined {
+export function overlayFor(r: Reaction, now: number, frame: number, selected: boolean, comforts = false): Overlay | undefined {
   if (r.until > now) {
     if (r.kind === 'cheer') return { hold: 'spin', bubble: 'yay!' }
-    if (r.kind === 'oops' && selected) return { hold: 'still', bubble: r.fails >= 3 ? '...' : 'oops' }
+    if (r.kind === 'oops' && selected) return { hold: 'still', bubble: r.fails >= 3 ? '...' : comforts ? '*pat*' : 'oops' }
   }
   if (r.thinking) return { hold: 'still', bubble: frame % 4 < 2 ? '?' : '' }
   return undefined
@@ -398,6 +456,44 @@ export function befriend(world: World, e: Encounter, now: number): World {
   return record(world, now, `${a.name} 和 ${b.name} 互相嗅嗅`)
 }
 
+// --- Too long at work ---------------------------------------------------------
+
+/** Whether a prompt or command came from the person at the keyboard or their phone, not from automation. */
+export function isHuman(origin: PromptOrigin): boolean {
+  return origin.kind === 'composer' || origin.kind === 'bridge'
+}
+
+const IDLE_GAP = 10 * 60000
+const BREAK_AFTER = 2 * 3600000
+
+/** The human did something at `now`: a gap of 10 minutes or more starts a new streak. */
+export function touchActivity(rec: Activity | undefined, now: number): Activity {
+  if (!rec || now - rec.lastActive >= IDLE_GAP) return { streakStart: now, lastActive: now, remindedStreak: rec?.remindedStreak ?? 0 }
+  return { ...rec, lastActive: now }
+}
+
+/** Still at it (active within 10 minutes) after a streak of 2 hours or more. */
+export function needsBreak(rec: Activity | undefined, now: number): boolean {
+  return rec !== undefined && now - rec.lastActive < IDLE_GAP && rec.lastActive - rec.streakStart >= BREAK_AFTER
+}
+
+/** The selected pet asks for a break, blinking, and keeps walking; the off half of the blink is no overlay. */
+export function breakOverlay(rec: Activity | undefined, now: number, frame: number): Overlay | undefined {
+  return needsBreak(rec, now) && frame % 8 < 4 ? { hold: 'none', bubble: 'break?' } : undefined
+}
+
+/** What the session shows over its pets besides their own mood. */
+export type Scene = { reaction: Reaction; encounter: Encounter | null; greetUntil: number; activity: Activity | undefined }
+
+/**
+ * The one overlay a pet shows. A due break owns the selected pet; otherwise the
+ * work reaction, then a meeting, then the greeting.
+ */
+export function overlayOf(p: Pet, selected: boolean, s: Scene, now: number, frame: number): Overlay | undefined {
+  if (selected && needsBreak(s.activity, now)) return breakOverlay(s.activity, now, frame)
+  return overlayFor(s.reaction, now, frame, selected, hasPerk(p, 'comfort')) ?? encounterOverlay(s.encounter, p.id, frame) ?? greetOverlay(p, now, s.greetUntil)
+}
+
 export const LEADER_TTL = 5000
 
 /** The record `me` writes to lead: when none leads, `me` already does, or the leader's beat is `LEADER_TTL` or more old; else null. */
@@ -408,12 +504,22 @@ export function claimLeader(current: Leader | undefined, me: string, now: number
 
 export type Mood = 'sleep' | 'eat' | 'play' | 'love' | 'sad' | 'idle'
 
+const isSad = (p: Pet) => Math.min(p.full, p.fun, p.energy) < 25
+// Low energy alone the pet sleeps off by itself; food and fun need the human.
+const needsYou = (p: Pet) => Math.min(p.full, p.fun) < 25
+
+/** Which pets just came to need the human (toast them) and the ids needing them now, to store as alerted. */
+export function sadTransitions(pets: Pet[], alerted: string[]): { toast: Pet[]; alerted: string[] } {
+  const sad = pets.filter(needsYou)
+  return { toast: sad.filter(p => !alerted.includes(p.id)), alerted: sad.map(p => p.id) }
+}
+
 export function mood(p: Pet, now: number): Mood {
   if (p.sleepingUntil > now) return 'sleep'
   if (p.eatingUntil > now) return 'eat'
   if (p.playingUntil > now) return 'play'
   if (p.heartsUntil > now) return 'love'
-  if (Math.min(p.full, p.fun, p.energy) < 25) return 'sad'
+  if (isSad(p)) return 'sad'
   return 'idle'
 }
 
@@ -556,11 +662,33 @@ export function mirror(line: string, width: number): string {
   return [...line.padEnd(width)].reverse().map(c => MIRROR[c] ?? c).join('')
 }
 
-/** Each pet's own walking speed, 0.6x to 1.4x, fixed by its id so it is the same in every session. */
-export function gait(p: Pet): { speed: number } {
+/** FNV-1a of the pet's id: fixed per pet, the same in every session. */
+function idHash(p: Pet): number {
   let h = 2166136261
   for (const c of p.id) h = Math.imul(h ^ c.charCodeAt(0), 16777619) >>> 0
-  return { speed: 0.6 + (h % 81) / 100 }
+  return h
+}
+
+/** Each pet's own walking speed, 0.6x to 1.4x, fixed by its id so it is the same in every session. */
+export function gait(p: Pet): { speed: number } {
+  return { speed: 0.6 + (idHash(p) % 81) / 100 }
+}
+
+export type Trait = 'glutton' | 'active' | 'lazy'
+
+/** The hash picks a trait by its place here: reordering this list changes every pet's personality. */
+const TRAIT_ORDER: readonly Trait[] = ['glutton', 'active', 'lazy']
+
+/** Per-minute stat drops, wander chances (when not playing) and extra nap minutes, by trait. */
+export const TRAITS: Record<Trait, { label: string; fullDrop: number; funDrop: number; runChance: number; restChance: number; napExtra: number }> = {
+  glutton: { label: '貪吃', fullDrop: 2, funDrop: 2, runChance: 0.15, restChance: 0.25, napExtra: 0 },
+  active: { label: '好動', fullDrop: 1, funDrop: 1, runChance: 0.3, restChance: 0.25, napExtra: 0 },
+  lazy: { label: '懶散', fullDrop: 1, funDrop: 2, runChance: 0.15, restChance: 0.5, napExtra: 5 },
+}
+
+/** The pet's personality, from the top byte of its id hash so it does not go with its speed (`hash % 81`). */
+export function trait(p: Pet): Trait {
+  return TRAIT_ORDER[(idHash(p) >>> 24) % TRAIT_ORDER.length]!
 }
 
 /**
@@ -579,16 +707,19 @@ export function stepWalker(w: Walker, p: Pet, now: number, frame: number, room: 
   const max = Math.max(0, room)
   const m = mood(p, now)
   if (m === 'sleep' || m === 'eat' || m === 'love' || m === 'sad') return { ...w, x: Math.min(w.x, max), frame }
-  // Reacting: a cheer spins on the spot, anything else holds still.
-  if (overlay) return { ...w, x: Math.min(w.x, max), frame, right: overlay.hold === 'spin' ? frame % 2 === 0 : w.right }
+  // Reacting: a cheer spins on the spot, a still one holds; a break request walks on.
+  if (overlay && overlay.hold !== 'none') return { ...w, x: Math.min(w.x, max), frame, right: overlay.hold === 'spin' ? frame % 2 === 0 : w.right }
   const playing = m === 'play'
   const { speed } = gait(p)
   const next = { ...w, x: Math.min(w.x, max), frame }
   for (let i = Math.min(frame - w.frame, 20); i > 0; i--) {
     if (next.left <= 0) {
       const r = rand()
-      // Playing pets rest less and run more.
-      next.mode = r < (playing ? 0.05 : 0.25) ? 'rest' : r < (playing ? 0.6 : 0.4) ? 'run' : 'walk'
+      // Playing pets rest less and run more; at night they rest twice as often.
+      const { restChance, runChance } = TRAITS[trait(p)]
+      const rest = Math.min(0.8, (playing ? 0.05 : restChance) * (isNight(now) ? 2 : 1))
+      const run = playing ? 0.55 : runChance
+      next.mode = r < rest ? 'rest' : r < rest + run ? 'run' : 'walk'
       next.left = next.mode === 'walk' ? 4 + Math.floor(rand() * 8) : 3 + Math.floor(rand() * 5)
       if (rand() < 0.4) next.right = !next.right
     }
@@ -605,25 +736,30 @@ export function sprite(p: Pet, now: number, frame: number, right = true, resting
   const m = mood(p, now)
   const grown = isGrown(p, now)
   const art = p.kind === 'cat' ? (grown ? CAT_ART : KITTEN_ART) : grown ? DOG_ART : PUPPY_ART
-  const reacting = overlay !== undefined && (m === 'idle' || m === 'play')
-  const sitting = m === 'love' || m === 'eat' || m === 'sad' || resting || (reacting && overlay.hold === 'still')
+  // A break request shows whatever the pet is doing; other overlays only on a pet that is up and about.
+  const shown = overlay !== undefined && (overlay.hold === 'none' || m === 'idle' || m === 'play') ? overlay : undefined
+  const sitting = m === 'love' || m === 'eat' || m === 'sad' || resting || shown?.hold === 'still'
   const pose = m === 'sleep' ? 'sleep' : sitting ? 'sit' : frame % 2 === 0 ? 'walkA' : 'walkB'
   let face = p.kind === 'cat' ? CAT_FACE[m] : DOG_EYE[m]
   if (m === 'idle' && frame % 7 === 6) face = p.kind === 'cat' ? '-.-' : '-'
   const zz = frame % 2 === 0 ? 'z ' : 'Zz'
   let lines = art[pose].map(l => l.replace('FACE', face).replace('E\\', face + '\\').replace('(E', '(' + face).replace('ZZ', zz))
-  if (m === 'love') lines[0] = lines[0].replace(/\s*$/, '') + (frame % 2 === 0 ? '  <3' : ' <3')
-  // A sad pet says what it misses, between sighs.
-  if (m === 'sad') lines[0] = (lines[0] ?? '').replace(/\s*$/, '') + (frame % 4 < 2 ? '  ' + need(p) : '  ...')
-  if (reacting && overlay.bubble !== '') lines[0] = (lines[0] ?? '').replace(/\s*$/, '') + '  ' + overlay.bubble
-  else if ((m === 'idle' || m === 'play') && isBirthday(p, now)) lines[0] = (lines[0] ?? '').replace(/\s*$/, '') + '  bday!'
   if (m === 'eat') lines[4] = lines[4].padEnd(15) + (frame % 2 === 0 ? '\\_/' : '\\~/')
   // A carried toy sits in the mouth (the snout's row), so it moves and turns with the pet.
   const toy = m === 'play' ? TOYS[p.kind][toyOf(p)] : undefined
   if (toy?.path === 'carry') lines[2] = (lines[2] ?? '').replace(/\s*$/, '') + toy.glyph
-  lines = lines.map(l => l.padEnd(ART_WIDTH).slice(0, ART_WIDTH))
   if (!right && pose !== 'sit' && pose !== 'sleep') lines = lines.map(l => mirror(l, ART_WIDTH))
-  return lines
+  // Words go on after mirroring so they never read backwards. One bubble: the
+  // overlay's, else what a sad pet misses (between sighs), else a birthday.
+  const head = (text: string) => (lines[0] = (lines[0] ?? '').replace(/\s*$/, '') + text)
+  if (m === 'love') head(frame % 2 === 0 ? '  <3' : ' <3')
+  const bubble = shown && shown.bubble !== '' ? shown.bubble
+    : m === 'sad' ? (frame % 4 < 2 ? need(p) : '...')
+    : (m === 'idle' || m === 'play') && isBirthday(p, now) ? 'bday!' : ''
+  // Over a sleeping pet the bubble takes the place of its z's, which leave no room beside them.
+  if (bubble !== '' && pose === 'sleep') lines[0] = (lines[0] ?? '').replace(zz, bubble)
+  else if (bubble !== '') head('  ' + bubble)
+  return lines.map(l => l.padEnd(ART_WIDTH).slice(0, ART_WIDTH))
 }
 
 type Toy = { glyph: string; note: string; path: 'bounce' | 'flick' | 'hop' | 'carry' }

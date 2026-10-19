@@ -1,6 +1,9 @@
 import { expect, test } from 'claude-code/testing'
-import type { Pet } from '../types'
-import { absenceSummary, act, adopt, ageLabel, ageMonths, isBirthday, ART_WIDTH, formatEvent, MAX_EVENTS, record, recentEvents, HUNGRY, TIRED, cycle, release, decay, emptyWorld, befriend, cheer, claimLeader, encounterOverlay, LEADER_TTL, fit, gait, GROWN_AFTER_DAYS, isGrown, meet, migrate, stageName, isTestCommand, merge, mood, need, newWalker, NO_REACTION, overlayFor, parseCommand, react, rename, sprite, stepWalker, TOYS, toyLine, toyOf } from './logic'
+import type { Pet, World } from '../types'
+import type { Scene, Trait } from './logic'
+import type { Overlay } from './logic'
+import { alone, NOON, withTrait } from './fixtures'
+import { overlayOf, greetOverlay, hasPerk, petLabel, trait, breakOverlay, needsBreak, touchActivity, isNight, sadTransitions, absenceSummary, act, adopt, ageLabel, ageMonths, isBirthday, ART_WIDTH, formatEvent, MAX_EVENTS, record, recentEvents, HUNGRY, TIRED, cycle, release, decay, emptyWorld, befriend, cheer, claimLeader, encounterOverlay, LEADER_TTL, fit, gait, GROWN_AFTER_DAYS, isGrown, meet, migrate, stageName, isTestCommand, merge, mood, need, newWalker, NO_REACTION, overlayFor, parseCommand, react, rename, sprite, stepWalker, TOYS, toyLine, toyOf } from './logic'
 
 test('adopt, feed, play, sleep', () => {
   let w = adopt(emptyWorld(0), 'cat', 0)
@@ -26,33 +29,69 @@ test('adopt, feed, play, sleep', () => {
 })
 
 test('stats decay over time and cap at 12h', () => {
-  const w = adopt(emptyWorld(0), 'dog', 0)
-  const later = decay(w, 10 * 60000)
+  const w = alone('dog', 'active')
+  const later = decay(w, NOON + 10 * 60000)
   expect(later.pets[0]?.full).toBe(70)
-  expect(later.lastTick).toBe(10 * 60000)
+  expect(later.lastTick).toBe(NOON + 10 * 60000)
   // Part of a minute waits for the next tick.
-  expect(decay(w, 10 * 60000 + 30000).lastTick).toBe(10 * 60000)
+  expect(decay(w, NOON + 10 * 60000 + 30000).lastTick).toBe(NOON + 10 * 60000)
 })
 
 test('pets eat and nap on their own', () => {
-  let w = adopt(emptyWorld(0), 'cat', 0)
+  const min = 60000
+  let w = alone('cat', 'active')
   // full 80 drops 1 a minute: below 25 after 56 minutes, then the cat eats.
-  w = decay(w, 56 * 60000)
+  w = decay(w, NOON + 56 * min)
   expect(w.pets[0]?.full).toBe(54)
   expect(w.note).toBe('咪咪 肚子餓，自己去吃飯了')
 
   // energy 80 drops 1 a minute: below 20 after 61 minutes, then a 10 minute nap.
-  w = decay(adopt(emptyWorld(0), 'dog', 0), 61 * 60000)
-  expect(w.pets[0]?.sleepingUntil).toBe(71 * 60000)
+  w = decay(alone('dog', 'active'), NOON + 61 * min)
+  expect(w.pets[0]?.sleepingUntil).toBe(NOON + 71 * min)
   expect(w.note).toBe('旺財 累了，自己去睡覺（10 分鐘）')
-  expect(mood(w.pets[0]!, 61 * 60000 + 1)).toBe('sleep')
-  w = decay(w, 71 * 60000)
+  expect(mood(w.pets[0]!, NOON + 61 * min + 1)).toBe('sleep')
+  w = decay(w, NOON + 71 * min)
   expect(w.pets[0]?.energy).toBe(79)
+})
 
-  // Left alone for days, a pet keeps itself fed and rested.
-  const away = decay(adopt(emptyWorld(0), 'cat', 0), 999 * 3600000).pets[0]!
-  expect(away.full).toBeGreaterThanOrEqual(HUNGRY - 1)
-  expect(away.energy).toBeGreaterThanOrEqual(TIRED - 1)
+test('left alone for days, every kind of pet keeps itself fed and rested, minute by minute, day and night', () => {
+  const min = 60000
+  for (const t of ['glutton', 'active', 'lazy'] as const) {
+    const start = new Date(2026, 9, 19, 21).getTime()
+    let w = decay(alone('cat', t, start), start + 999 * 3600000)
+    expect(w.pets[0]!.full).toBeGreaterThanOrEqual(HUNGRY - 1)
+    w = { ...alone('cat', t, start), lastTick: start }
+    for (let m = 1; m <= 24 * 60; m++) {
+      w = decay(w, start + m * min)
+      expect(w.pets[0]!.full).toBeGreaterThanOrEqual(HUNGRY - 1)
+      expect(w.pets[0]!.energy).toBeGreaterThanOrEqual(TIRED - 1)
+    }
+  }
+})
+
+test('a pet that would wake from a nap hungry eats first', () => {
+  const min = 60000
+  const night = new Date(2026, 9, 19, 23).getTime()
+  const w = alone('dog', 'glutton', night)
+  // Next minute: full 48, energy 19, a 30 minute night nap that costs a glutton 60 full.
+  const tired = { ...w, pets: [{ ...w.pets[0]!, full: 50, energy: 20, heartsUntil: 0 }] }
+  const napping = decay(tired, night + min)
+  expect(napping.events.slice(-2)).toEqual([
+    { at: night + min, text: '旺財 肚子餓，自己去吃飯了' },
+    { at: night + min, text: '旺財 累了，自己去睡覺（30 分鐘）' },
+  ])
+  // Asleep it cannot eat, so it must not go hungry before it wakes.
+  let x = napping
+  for (let m = 2; m <= 31; m++) {
+    x = decay(x, night + m * min)
+    expect(x.pets[0]!.full).toBeGreaterThanOrEqual(HUNGRY - 1)
+  }
+  expect(mood(x.pets[0]!, night + 31 * min)).not.toBe('sleep')
+
+  // Fed enough already: just the nap.
+  const fed = decay({ ...w, pets: [{ ...w.pets[0]!, full: 90, energy: 20 }] }, night + min)
+  expect(fed.events.at(-1)?.text).toBe('旺財 累了，自己去睡覺（30 分鐘）')
+  expect(fed.events.filter(e => e.text.includes('吃飯')).length).toBe(0)
 })
 
 test('rename the selected pet', () => {
@@ -139,7 +178,7 @@ test('pets wander at random inside the pane', () => {
   let seed = 1
   const rand = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646
   const w = adopt(adopt(emptyWorld(0), 'cat', 1), 'dog', 2)
-  const now = 100_000
+  const now = NOON
   const room = 20
   const runs = w.pets.map(p => {
     let walker = newWalker(room, 0, rand)
@@ -335,11 +374,11 @@ test('things that happen go in the log; refusals do not', () => {
 })
 
 test('what pets do on their own is logged at the minute it happened', () => {
-  const w = decay(adopt(emptyWorld(0), 'dog', 0), 61 * 60000)
+  const w = decay(alone('dog', 'active'), NOON + 61 * 60000)
   expect(w.events).toEqual([
-    { at: 0, text: '旺財 來到你家了！' },
-    { at: 56 * 60000, text: '旺財 肚子餓，自己去吃飯了' },
-    { at: 61 * 60000, text: '旺財 累了，自己去睡覺（10 分鐘）' },
+    { at: NOON, text: '旺財 來到你家了！' },
+    { at: NOON + 56 * 60000, text: '旺財 肚子餓，自己去吃飯了' },
+    { at: NOON + 61 * 60000, text: '旺財 累了，自己去睡覺（10 分鐘）' },
   ])
 
   const day = 86400000
@@ -426,4 +465,249 @@ test('pets show their age and have a birthday every 30 days', () => {
   expect(bday[0]).toContain('bday!')
   for (const line of bday) expect(line.length).toBe(ART_WIDTH)
   expect(sprite({ ...cat, heartsUntil: 0 }, 31 * day, 0)[0]).not.toContain('bday!')
+})
+
+test('a pet that needs you is alerted once, and again only after it recovers', () => {
+  const cat = adopt(emptyWorld(0), 'cat', 0).pets[0]!
+  const sad = { ...cat, fun: 24 }
+  const fine = { ...cat, fun: 25 }
+  expect(sadTransitions([fine], [])).toEqual({ toast: [], alerted: [] })
+  expect(sadTransitions([sad], [])).toEqual({ toast: [sad], alerted: [cat.id] })
+  expect(sadTransitions([sad], [cat.id])).toEqual({ toast: [], alerted: [cat.id] })
+  const recovered = sadTransitions([fine], [cat.id])
+  expect(recovered.alerted).toEqual([])
+  expect(sadTransitions([sad], recovered.alerted).toast).toEqual([sad])
+  // Hunger and boredom need you; low energy alone the pet sleeps off.
+  expect(sadTransitions([{ ...cat, full: 10 }, { ...cat, id: 'x', fun: 20 }], []).alerted).toEqual([cat.id, 'x'])
+  expect(sadTransitions([{ ...cat, energy: 22 }], [])).toEqual({ toast: [], alerted: [] })
+  expect(mood({ ...cat, energy: 22, heartsUntil: 0 }, 10)).toBe('sad')
+})
+
+test('night is from 22:00 to before 07:00 local time', () => {
+  const at = (h: number, m = 0) => new Date(2026, 9, 19, h, m).getTime()
+  expect([at(21, 59), at(22), at(23, 59), at(0), at(6, 59), at(7), at(12)].map(isNight)).toEqual([false, true, true, true, true, false, false])
+})
+
+test('a tired pet naps 30 minutes at night instead of 10', () => {
+  const base = new Date(2026, 9, 19, 22, 0).getTime()
+  // energy 80 drops 1 a minute: below 20 after 61 minutes.
+  const w = decay(alone('dog', 'active', base), base + 61 * 60000)
+  expect(w.note).toBe('旺財 累了，自己去睡覺（30 分鐘）')
+  expect(w.pets[0]?.sleepingUntil).toBe(base + 91 * 60000)
+})
+
+test('at night a wandering pet rests twice as often', () => {
+  const pick = (h: number, r: number) => {
+    const base = new Date(2026, 9, 19, h, 0).getTime()
+    const p = alone('cat', 'glutton', base).pets[0]!
+    return stepWalker({ x: 5, right: true, mode: 'walk', left: 0, frame: 0 }, p, base + 10_000, 1, 20, () => r).mode
+  }
+  // By day: rest under 0.25, run under 0.40. By night: rest under 0.50.
+  expect([pick(12, 0.24), pick(12, 0.3), pick(12, 0.45)]).toEqual(['rest', 'run', 'walk'])
+  expect([pick(23, 0.3), pick(23, 0.49), pick(23, 0.6), pick(23, 0.7)]).toEqual(['rest', 'rest', 'run', 'walk'])
+})
+
+test('a gap of 10 minutes or more starts a new activity streak', () => {
+  const min = 60000
+  expect(touchActivity(undefined, 5 * min)).toEqual({ streakStart: 5 * min, lastActive: 5 * min, remindedStreak: 0 })
+  const rec = { streakStart: 0, lastActive: 20 * min, remindedStreak: 0 }
+  expect(touchActivity(rec, 30 * min - 1)).toEqual({ streakStart: 0, lastActive: 30 * min - 1, remindedStreak: 0 })
+  expect(touchActivity(rec, 30 * min)).toEqual({ streakStart: 30 * min, lastActive: 30 * min, remindedStreak: 0 })
+})
+
+test('a break is due after 2 hours of activity, while still active', () => {
+  const min = 60000, hour = 60 * min
+  const rec = (streak: number) => ({ streakStart: 0, lastActive: streak, remindedStreak: 0 })
+  expect(needsBreak(undefined, 0)).toBe(false)
+  expect(needsBreak(rec(2 * hour - 1), 2 * hour)).toBe(false)
+  expect(needsBreak(rec(2 * hour), 2 * hour)).toBe(true)
+  expect(needsBreak(rec(2 * hour), 2 * hour + 10 * min - 1)).toBe(true)
+  expect(needsBreak(rec(2 * hour), 2 * hour + 10 * min)).toBe(false)
+})
+
+test('the selected pet asks for a break, blinking', () => {
+  const hour = 3600000
+  const due = { streakStart: 0, lastActive: 2 * hour, remindedStreak: 0 }
+  const cat = { ...adopt(emptyWorld(0), 'cat', 0).pets[0]!, heartsUntil: 0 }
+  expect(sprite(cat, 2 * hour, 0, true, false, breakOverlay(due, 2 * hour, 0))[0]).toContain('break?')
+  expect(sprite(cat, 2 * hour, 4, true, false, breakOverlay(due, 2 * hour, 4))[0]).not.toContain('break?')
+  expect(breakOverlay({ ...due, lastActive: hour }, hour, 0)).toBeUndefined()
+})
+
+test('a due break wins every other bubble on the selected pet, whatever its mood', () => {
+  const hour = 3600000, now = 2 * hour
+  const due = { streakStart: 0, lastActive: now, remindedStreak: 0 }
+  const cat = { ...adopt(emptyWorld(0), 'cat', 0).pets[0]!, id: 'a', heartsUntil: 0, bond: 80 }
+  const busy: Scene = {
+    reaction: react(react(NO_REACTION, 'think', 0), 'fail', now),
+    encounter: { kind: 'swat', a: 'a', b: 'b', until: 9 },
+    greetUntil: now + 1,
+    activity: due,
+  }
+  const bubble = (s: Scene, selected = true, frame = 0) => overlayOf(cat, selected, s, now, frame)?.bubble
+  expect(bubble(busy)).toBe('break?')
+  // The blink's off half shows nothing, not what the break covers.
+  expect(overlayOf(cat, true, busy, now, 4)).toBeUndefined()
+  // Not selected, or not due: the reaction, then the meeting, then the greeting.
+  expect(bubble(busy, false)).toBe('?')
+  const idle = { ...busy, activity: undefined }
+  expect(bubble(idle)).toBe('*pat*')
+  expect(bubble({ ...idle, reaction: NO_REACTION })).toBe('paw!')
+  expect(bubble({ ...idle, reaction: NO_REACTION, encounter: null })).toBe('hi!')
+  expect(bubble({ ...idle, reaction: NO_REACTION, encounter: null, greetUntil: 0 })).toBeUndefined()
+
+  // Drawn over a sad, sleeping, eating or loved pet too.
+  const o = overlayOf(cat, true, busy, now, 0)
+  const w = { ...emptyWorld(0), pets: [{ ...cat, full: 50 }] }
+  const pets = [{ ...cat, fun: 5 }, act(w, 'sleep', now).pets[0]!, act(w, 'feed', now).pets[0]!, { ...cat, heartsUntil: now + 2 }]
+  expect(pets.map(p => mood(p, now + 1))).toEqual(['sad', 'sleep', 'eat', 'love'])
+  for (const p of pets) expect(sprite(p, now + 1, 0, true, false, o)[0]).toContain('break?')
+})
+
+test('a pet asking for a break keeps walking', () => {
+  let seed = 7
+  const rand = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646
+  const hour = 3600000, now = NOON + 2 * hour
+  const cat = { ...alone('cat', 'active').pets[0]!, heartsUntil: 0 }
+  const scene: Scene = { reaction: react(NO_REACTION, 'think', 0), encounter: null, greetUntil: 0, activity: { streakStart: NOON, lastActive: now, remindedStreak: 0 } }
+  let walker = { x: 10, right: true, mode: 'walk' as const, left: 0, frame: 0 } as ReturnType<typeof newWalker>
+  const xs = new Set<number>()
+  for (let f = 1; f <= 16; f++) {
+    walker = stepWalker(walker, cat, now, f, 20, rand, overlayOf(cat, true, scene, now, f))
+    xs.add(Math.round(walker.x))
+  }
+  expect(xs.size).toBeGreaterThan(3)
+  // Facing left it still reads the right way round.
+  expect(sprite(cat, now, 0, false, false, overlayOf(cat, true, scene, now, 0))[0]).toContain('break?')
+})
+
+test('a pet keeps the trait it was born with: ids map to the same traits as when traits shipped', () => {
+  const traitOf = (id: string) => trait({ ...adopt(emptyWorld(0), 'cat', 0).pets[0]!, id })
+  expect(['cat-0', 'dog-0', 'cat-1', 'dog-1', 'cat-1000'].map(traitOf)).toEqual(['lazy', 'glutton', 'glutton', 'active', 'lazy'])
+})
+
+test('each pet has a fixed trait from its id, independent of its speed', () => {
+  const pets = Array.from({ length: 600 }, (_, i) => ({ ...adopt(emptyWorld(0), 'cat', 0).pets[0]!, id: `cat-${1760000000000 + i * 7919}` }))
+  expect(trait(pets[0]!)).toBe(trait({ ...pets[0]!, name: 'other' }))
+  for (const t of ['glutton', 'active', 'lazy'] as const) {
+    const speeds = pets.filter(p => trait(p) === t).map(p => gait(p).speed)
+    expect(speeds.length).toBeGreaterThan(150)
+    // Every trait has slow and fast walkers alike.
+    expect(speeds.filter(s => s < 1).length).toBeGreaterThan(speeds.length / 3)
+    expect(speeds.filter(s => s >= 1).length).toBeGreaterThan(speeds.length / 3)
+  }
+})
+
+test('a trait sets how fast stats drop and how long a self-nap lasts', () => {
+  const after10 = (t: Trait) => decay(alone('cat', t), NOON + 10 * 60000).pets[0]!
+  expect([after10('glutton').full, after10('glutton').fun]).toEqual([60, 60])
+  expect([after10('active').full, after10('active').fun]).toEqual([70, 70])
+  expect([after10('lazy').full, after10('lazy').fun]).toEqual([70, 60])
+
+  // energy 80 drops 1 a minute: below 20 after 61 minutes.
+  const day = new Date(2026, 9, 19, 12).getTime(), night = new Date(2026, 9, 19, 22).getTime()
+  expect(decay(alone('dog', 'lazy', day), day + 61 * 60000).note).toBe('旺財 累了，自己去睡覺（15 分鐘）')
+  expect(decay(alone('dog', 'lazy', night), night + 61 * 60000).note).toBe('旺財 累了，自己去睡覺（35 分鐘）')
+})
+
+test('an active pet runs twice as often; a lazy one rests twice as often, and more at night but not always', () => {
+  const pick = (t: Trait, h: number, r: number) => {
+    const base = new Date(2026, 9, 19, h).getTime()
+    return stepWalker({ x: 5, right: true, mode: 'walk', left: 0, frame: 0 }, alone('cat', t, base).pets[0]!, base + 10_000, 1, 20, () => r).mode
+  }
+  // Active by day: rest under 0.25, run under 0.55.
+  expect([pick('active', 12, 0.24), pick('active', 12, 0.5), pick('active', 12, 0.56)]).toEqual(['rest', 'run', 'walk'])
+  // Lazy by day: rest under 0.50, run under 0.65; by night rest is capped at 0.80, so it still gets up.
+  expect([pick('lazy', 12, 0.49), pick('lazy', 12, 0.6), pick('lazy', 12, 0.66)]).toEqual(['rest', 'run', 'walk'])
+  expect([pick('lazy', 23, 0.79), pick('lazy', 23, 0.81), pick('lazy', 23, 0.96)]).toEqual(['rest', 'run', 'walk'])
+})
+
+test('feeding, petting and playing build the bond; refusals and sleep do not', () => {
+  const w = alone('cat', 'active', 0)
+  const bond = (x: World) => [x.pets[0]!.bond, x.pets[0]!.bondAt]
+  expect(bond(w)).toEqual([0, 0])
+  expect(bond(act({ ...w, pets: [{ ...w.pets[0]!, full: 50 }] }, 'feed', 1000))).toEqual([2, 1000])
+  expect(bond(act(w, 'pet', 1000))).toEqual([1, 1000])
+  expect(bond(act(w, 'play', 1000))).toEqual([3, 1000])
+  expect(bond(act(w, 'sleep', 1000))).toEqual([0, 0])
+  // Refused: too full, too tired, asleep.
+  expect(bond(act({ ...w, pets: [{ ...w.pets[0]!, full: 95 }] }, 'feed', 1000))).toEqual([0, 0])
+  expect(bond(act({ ...w, pets: [{ ...w.pets[0]!, energy: 10 }] }, 'play', 1000))).toEqual([0, 0])
+  expect(bond(act(act(w, 'sleep', 1000), 'pet', 2000))).toEqual([0, 0])
+  expect(act({ ...w, pets: [{ ...w.pets[0]!, bond: 99 }] }, 'play', 1000).pets[0]!.bond).toBe(100)
+})
+
+test('saves from before the bond start with none from now', () => {
+  const w = adopt(emptyWorld(0), 'cat', 0)
+  const { bond: _b, bondAt: _a, ...old } = w.pets[0]!
+  expect(migrate({ ...w, pets: [old as Pet] }, 500).pets[0]).toMatchObject({ bond: 0, bondAt: 500, bornAt: 0 })
+  expect(migrate(w, 500)).toBe(w)
+})
+
+test('the bond fades 5 a day once 3 days pass without care', () => {
+  const day = 86400000
+  const w = { ...alone('cat', 'active', 0), pets: [{ ...alone('cat', 'active', 0).pets[0]!, bond: 50 }] }
+  const at = (from: number, to: number) => decay({ ...w, lastTick: from }, to).pets[0]!.bond
+  expect(at(3 * day - 60000, 3 * day)).toBe(50)
+  expect(at(4 * day - 60000, 4 * day)).toBe(45)
+  expect(at(4 * day, 4 * day + 60000)).toBe(50)
+  // Away for 10 days: days 4 to 10 each take 5.
+  expect(at(0, 10 * day)).toBe(15)
+  expect(at(0, 30 * day)).toBe(0)
+})
+
+test('perks come with the bond', () => {
+  const cat = adopt(emptyWorld(0), 'cat', 0).pets[0]!
+  const perks = (bond: number) => (['greet', 'comfort'] as const).filter(k => hasPerk({ ...cat, bond }, k))
+  expect([perks(49), perks(50), perks(79), perks(80)]).toEqual([[], ['greet'], ['greet'], ['greet', 'comfort']])
+})
+
+test('a close pet says hi for 3 s and pats you when a call fails', () => {
+  const cat = { ...adopt(emptyWorld(0), 'cat', 0).pets[0]!, heartsUntil: 0 }
+  expect(greetOverlay({ ...cat, bond: 50 }, 2999, 3000)).toEqual({ hold: 'still', bubble: 'hi!' })
+  expect(greetOverlay({ ...cat, bond: 50 }, 3000, 3000)).toBeUndefined()
+  expect(greetOverlay({ ...cat, bond: 49 }, 0, 3000)).toBeUndefined()
+  expect(sprite(cat, 10, 0, true, false, greetOverlay({ ...cat, bond: 50 }, 0, 3000))[0]).toContain('hi!')
+
+  const failed = react(NO_REACTION, 'fail', 0)
+  expect(overlayFor(failed, 0, 0, true, hasPerk({ ...cat, bond: 80 }, 'comfort'))?.bubble).toBe('*pat*')
+  expect(overlayFor(failed, 0, 0, true, hasPerk({ ...cat, bond: 79 }, 'comfort'))?.bubble).toBe('oops')
+})
+
+test('the name label shows stage, age, trait and a heart per 25 bond', () => {
+  const cat = withTrait({ ...adopt(emptyWorld(0), 'cat', 0).pets[0]!, name: '貓貓' }, 'glutton')
+  const day = 86400000
+  expect(petLabel({ ...cat, bond: 24 }, 11 * day)).toBe('貓貓（貓，11 天，貪吃）')
+  expect(petLabel({ ...cat, bond: 50 }, 11 * day)).toBe('貓貓（貓，11 天，貪吃，<3<3）')
+  expect(petLabel({ ...cat, bond: 100 }, 0)).toBe('貓貓（幼貓，0 天，貪吃，<3<3<3<3）')
+})
+
+test('every bubble on every kind, stage, pose and facing keeps the art width', () => {
+  const day = 86400000
+  const fail3 = react(react(react(NO_REACTION, 'fail', 0), 'fail', 0), 'fail', 0)
+  const overlays: Overlay[] = [
+    overlayFor(react(NO_REACTION, 'pass', 0), 0, 0, true)!,
+    overlayFor(react(NO_REACTION, 'fail', 0), 0, 0, true)!,
+    overlayFor(react(NO_REACTION, 'fail', 0), 0, 0, true, true)!,
+    overlayFor(fail3, 0, 0, true)!,
+    overlayFor(react(NO_REACTION, 'think', 0), 0, 0, true)!,
+    ...(['play', 'swat', 'sniff'] as const).flatMap(kind => [0, 1].flatMap(f => ['a', 'b'].map(id => encounterOverlay({ kind, a: 'a', b: 'b', until: 9 }, id, f)!))),
+    greetOverlay({ ...adopt(emptyWorld(0), 'cat', 0).pets[0]!, bond: 50 }, 0, 1)!,
+    breakOverlay({ streakStart: 0, lastActive: 2 * 3600000, remindedStreak: 0 }, 2 * 3600000, 0)!,
+  ]
+  const bubbles = new Set(overlays.map(o => o.bubble))
+  expect([...bubbles].sort()).toEqual(['!', '!!', '*pat*', '...', '..?', '?', 'break?', 'fun!', 'hi!', 'oops', 'paw!', 'yay!'].sort())
+  for (const kind of ['cat', 'dog'] as const) for (const now of [10_000, 8 * day, 30 * day + 1000]) {
+    const p = { ...adopt(emptyWorld(0), kind, 0).pets[0]!, heartsUntil: 0 }
+    const one = { ...emptyWorld(0), pets: [{ ...p, full: 50 }] }
+    const moods = [p, { ...p, heartsUntil: now + 1 }, { ...p, full: 5 }, { ...p, fun: 5 }, { ...p, energy: 5 }, act({ ...emptyWorld(0), pets: [p] }, 'play', now).pets[0]!, act(one, 'sleep', now).pets[0]!, act(one, 'feed', now).pets[0]!]
+    for (const pet of moods) for (const f of [0, 1, 2, 3]) for (const right of [true, false]) for (const resting of [true, false]) {
+      for (const o of [undefined, ...overlays]) {
+        const lines = sprite(pet, now + 1, f, right, resting, o)
+        for (const line of lines) expect(line.length).toBe(ART_WIDTH)
+        // An idle pet shows every bubble facing either way; a break shows on every mood.
+        if (o && o.bubble && (pet === p || o.hold === 'none')) expect(lines[0]).toContain(o.bubble)
+      }
+    }
+  }
 })

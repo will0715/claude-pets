@@ -1,9 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
-import type { Leader, Reaction, World } from '../types'
+import type { Activity, Leader, Reaction, World } from '../types'
 import type { Encounter, Walker } from './logic'
-import { absenceSummary, act, adopt, formatEvent, merge, parseCommand, recentEvents, rename, USAGE, ART_WIDTH, bar, cycle, befriend, cheer, claimLeader, decay, emptyWorld, encounterOverlay, fit, isTestCommand, meet, MEET_COOLDOWN, migrate, stageName, ageLabel, newWalker, NO_REACTION, overlayFor, react, release, sprite, stepWalker, toyLine } from './logic'
+import { isHuman, overlayOf, petLabel, needsBreak, record, touchActivity, isNight, absenceSummary, act, adopt, formatEvent, merge, need, sadTransitions, parseCommand, recentEvents, rename, USAGE, ART_WIDTH, bar, cycle, befriend, cheer, claimLeader, decay, emptyWorld, fit, isTestCommand, meet, MEET_COOLDOWN, migrate, newWalker, NO_REACTION, react, release, sprite, stepWalker, toyLine } from './logic'
 
 const PANE = 'pets'
 const STORE_KEY = 'world'
@@ -18,6 +18,10 @@ let nextMeet = 0
 // Every open session runs the frame timer; only the leader rolls encounters,
 // or N sessions would make the pets meet N times as often.
 let isLeader = false
+// The shared activity record as of the last heartbeat; rendering reads this, never the store.
+let activity: Activity | undefined
+// Close pets say hi until then, in this session only: they greet you when you open one.
+let greetUntil = 0
 
 // Every change starts from the store, so one session's actions are not
 // overwritten by another session's older copy.
@@ -26,10 +30,31 @@ async function change($: EngineInterface, fn: (w: World, now: number) => World) 
   const saved = (await $.store.get(STORE_KEY)) as World | undefined
   const w = await update($, world, cur => fn(decay(migrate(merge(saved, cur), now), now), now))
   await $.store.set(STORE_KEY, { ...w, frame: 0 })
+  if (isLeader) await alertSad($, w)
+}
+
+// The alerted ids live in the store so a new leader or a reload does not toast them again.
+async function alertSad($: EngineInterface, w: World) {
+  const before = ((await $.store.get('sadAlerted')) as string[] | undefined) ?? []
+  const { toast, alerted } = sadTransitions(w.pets, before)
+  for (const p of toast) $.ui.toast(`${p.name} 不開心了（${need(p)}）`)
+  if (alerted.length !== before.length || alerted.some((id, i) => id !== before[i])) await $.store.set('sadAlerted', alerted)
+}
+
+// The human did something. Every writer says "someone is active now", so
+// concurrent writes converge without a lock; 30 s apart at most.
+async function touch($: EngineInterface) {
+  const now = await $.clock.now()
+  const rec = (await $.store.get('activity')) as Activity | undefined
+  if (rec && now - rec.lastActive < 30000) return
+  activity = touchActivity(rec, now)
+  await $.store.set('activity', activity)
 }
 
 async function heartbeat($: EngineInterface, me: string) {
-  const claim = claimLeader((await $.store.get('leader')) as Leader | undefined, me, await $.clock.now())
+  const now = await $.clock.now()
+  activity = (await $.store.get('activity')) as Activity | undefined
+  const claim = claimLeader((await $.store.get('leader')) as Leader | undefined, me, now)
   if (!claim) {
     isLeader = false
     return
@@ -37,6 +62,13 @@ async function heartbeat($: EngineInterface, me: string) {
   await $.store.set('leader', claim)
   // Two sessions that both claimed a stale record converge: the later write wins.
   isLeader = ((await $.store.get('leader')) as Leader | undefined)?.id === me
+  if (!isLeader || !activity || !needsBreak(activity, now) || activity.remindedStreak === activity.streakStart) return
+  const seen = await read($, world)
+  const name = seen.pets[seen.selected]?.name
+  if (name === undefined) return
+  activity = { ...activity, remindedStreak: activity.streakStart }
+  await $.store.set('activity', activity)
+  await change($, (w, n) => record(w, n, `${name} 提醒你休息一下`))
 }
 
 async function petsView($: EngineInterface, e: RenderInput<'Pane'>, bodyColumns: number) {
@@ -51,13 +83,18 @@ async function petsView($: EngineInterface, e: RenderInput<'Pane'>, bodyColumns:
     const mood = await read($, reaction)
     const current = w.pets[w.selected]
     const now = await $.clock.now()
+    const busy = (fn: () => unknown) => () => {
+      void touch($)
+      void fn()
+    }
 
     return (
       <Box flexDirection="column">
+        <Text dimColor>{isNight(now) ? '夜晚' : '白天'}</Text>
         {w.pets.length === 0 && <Text dimColor>還沒有寵物，按 c 領養貓、d 領養狗。</Text>}
         {w.pets.map((p, i) => {
           const room = width - ART_WIDTH
-          const overlay = overlayFor(mood, now, w.frame, i === w.selected) ?? encounterOverlay(encounter, p.id, w.frame)
+          const overlay = overlayOf(p, i === w.selected, { reaction: mood, encounter, greetUntil, activity }, now, w.frame)
           const pos = stepWalker(walkers.get(p.id) ?? newWalker(room, w.frame, Math.random), p, now, w.frame, room, Math.random, overlay)
           walkers.set(p.id, pos)
           const lines = sprite(p, now, w.frame, pos.right, pos.mode === 'rest', overlay).map(l => fit(' '.repeat(Math.round(pos.x)) + l, width).trimEnd() || ' ')
@@ -68,7 +105,7 @@ async function petsView($: EngineInterface, e: RenderInput<'Pane'>, bodyColumns:
             <Box flexDirection="column">
               <Text bold={isSel} dimColor={!isSel} wrap="truncate-end">
                 {isSel ? '> ' : '  '}
-                {p.name}（{stageName(p, now)}，{ageLabel(p, now)}）
+                {petLabel(p, now)}
               </Text>
               {lines.map(line => (
                 <Text wrap="truncate-end">{line}</Text>
@@ -92,23 +129,24 @@ async function petsView($: EngineInterface, e: RenderInput<'Pane'>, bodyColumns:
             submitLabel="改名"
             autoFocus
             onSubmit={(value: string) => {
+              void touch($)
               void change($, (x, n) => rename(x, value, n))
               void update($, renaming, () => false)
             }}
           />
         )}
         <Box flexDirection="row" columnGap={1}>
-          <Button key="feed" hotkey="f" plain onPress={() => void change($, (x, n) => act(x, 'feed', n))}>餵食</Button>
-          <Button key="pet" hotkey="t" plain onPress={() => void change($, (x, n) => act(x, 'pet', n))}>摸摸</Button>
-          <Button key="play" hotkey="p" plain onPress={() => void change($, (x, n) => act(x, 'play', n))}>玩耍</Button>
-          <Button key="sleep" hotkey="s" plain onPress={() => void change($, (x, n) => act(x, 'sleep', n))}>睡覺</Button>
+          <Button key="feed" hotkey="f" plain onPress={busy(() => change($, (x, n) => act(x, 'feed', n)))}>餵食</Button>
+          <Button key="pet" hotkey="t" plain onPress={busy(() => change($, (x, n) => act(x, 'pet', n)))}>摸摸</Button>
+          <Button key="play" hotkey="p" plain onPress={busy(() => change($, (x, n) => act(x, 'play', n)))}>玩耍</Button>
+          <Button key="sleep" hotkey="s" plain onPress={busy(() => change($, (x, n) => act(x, 'sleep', n)))}>睡覺</Button>
         </Box>
         <Box flexDirection="row" columnGap={1}>
-          <Button key="next" hotkey="n" plain onPress={() => void change($, x => cycle(x))}>換一隻</Button>
-          <Button key="cat" hotkey="c" plain onPress={() => void change($, (x, n) => adopt(x, 'cat', n))}>領養貓</Button>
-          <Button key="dog" hotkey="d" plain onPress={() => void change($, (x, n) => adopt(x, 'dog', n))}>領養狗</Button>
-          {Input && <Button key="rename" hotkey="r" plain onPress={() => void update($, renaming, on => !on)}>改名</Button>}
-          <Button key="bye" hotkey="x" plain dimColor onPress={() => void change($, (x, n) => release(x, n))}>送養</Button>
+          <Button key="next" hotkey="n" plain onPress={busy(() => change($, x => cycle(x)))}>換一隻</Button>
+          <Button key="cat" hotkey="c" plain onPress={busy(() => change($, (x, n) => adopt(x, 'cat', n)))}>領養貓</Button>
+          <Button key="dog" hotkey="d" plain onPress={busy(() => change($, (x, n) => adopt(x, 'dog', n)))}>領養狗</Button>
+          {Input && <Button key="rename" hotkey="r" plain onPress={busy(() => update($, renaming, on => !on))}>改名</Button>}
+          <Button key="bye" hotkey="x" plain dimColor onPress={busy(() => change($, (x, n) => release(x, n)))}>送養</Button>
         </Box>
       </Box>
     )
@@ -125,6 +163,9 @@ export const register: Register = on => {
       if (summary !== '') $.ui.toast(summary)
     }
     await update($, world, () => decayed)
+    greetUntil = now + 3000
+    // Earlier versions pinned a status line; the engine keeps it across a reload until cleared.
+    $.ui.status(undefined)
 
     await update($, renaming, () => false)
 
@@ -159,7 +200,15 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // Only the human's own prompts and commands count as being at work, not automation's.
+  on('prompt.submit', async ($, e, next) => {
+    const result = await next(e)
+    if (isHuman(e.origin)) await touch($)
+    return result
+  })
+
   on('command.run', { command: 'pets' }, async ($, e) => {
+    if (isHuman(e.origin)) await touch($)
     const step = parseCommand(e.args)
     if (step === null) return { text: USAGE }
     if (step === 'log') {
