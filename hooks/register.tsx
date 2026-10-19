@@ -152,6 +152,16 @@ async function petsView($: EngineInterface, e: RenderInput<'Pane'>, bodyColumns:
     )
 }
 
+// Earlier versions pinned a status line, which the engine keeps until cleared. A
+// plugin reload need not fire session.start again, so the first prompt or /pets
+// command after a load clears it too.
+let statusCleared = false
+function clearOldStatus($: EngineInterface) {
+  if (statusCleared) return
+  statusCleared = true
+  $.ui.status(undefined)
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const result = await next(e)
@@ -164,8 +174,7 @@ export const register: Register = on => {
     }
     await update($, world, () => decayed)
     greetUntil = now + 3000
-    // Earlier versions pinned a status line; the engine keeps it across a reload until cleared.
-    $.ui.status(undefined)
+    clearOldStatus($)
 
     await update($, renaming, () => false)
 
@@ -202,12 +211,14 @@ export const register: Register = on => {
 
   // Only the human's own prompts and commands count as being at work, not automation's.
   on('prompt.submit', async ($, e, next) => {
+    clearOldStatus($)
     const result = await next(e)
     if (isHuman(e.origin)) await touch($)
     return result
   })
 
   on('command.run', { command: 'pets' }, async ($, e) => {
+    clearOldStatus($)
     if (isHuman(e.origin)) await touch($)
     const step = parseCommand(e.args)
     if (step === null) return { text: USAGE }

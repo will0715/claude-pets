@@ -250,3 +250,14 @@ test('a lone session leads and its pets meet', async ($, on) => {
 test('another live session leading stops this one rolling encounters', async ($, on) => {
   expect(await encounters($, on, true)).toBe(0)
 })
+
+test('after a plugin reload with no new session start, the first /pets command clears the old status line', async ($, on) => {
+  mock.clock(on, { now: NOON })
+  mock.store(on, { world: sadSoon() })
+  const statuses: (string | undefined)[] = []
+  on('ui.status', ($, e) => ({ value: void statuses.push(e.text) }))
+  const run = () => $.command.run({ command: 'pets', args: 'log', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+  await run()
+  await run()
+  expect(statuses).toEqual([undefined])
+})
