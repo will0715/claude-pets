@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import type { Pet } from '../types'
-import { absenceSummary, act, adopt, ART_WIDTH, formatEvent, MAX_EVENTS, record, recentEvents, HUNGRY, TIRED, cycle, release, decay, emptyWorld, befriend, cheer, claimLeader, encounterOverlay, LEADER_TTL, fit, gait, GROWN_AFTER_DAYS, isGrown, meet, migrate, stageName, isTestCommand, merge, mood, need, newWalker, NO_REACTION, overlayFor, parseCommand, react, rename, sprite, stepWalker, TOYS, toyLine, toyOf } from './logic'
+import { absenceSummary, act, adopt, ageLabel, ageMonths, isBirthday, ART_WIDTH, formatEvent, MAX_EVENTS, record, recentEvents, HUNGRY, TIRED, cycle, release, decay, emptyWorld, befriend, cheer, claimLeader, encounterOverlay, LEADER_TTL, fit, gait, GROWN_AFTER_DAYS, isGrown, meet, migrate, stageName, isTestCommand, merge, mood, need, newWalker, NO_REACTION, overlayFor, parseCommand, react, rename, sprite, stepWalker, TOYS, toyLine, toyOf } from './logic'
 
 test('adopt, feed, play, sleep', () => {
   let w = adopt(emptyWorld(0), 'cat', 0)
@@ -404,4 +404,26 @@ test('a session claims leadership when none leads, renews its own, and takes ove
 
 test('a leader whose beat is exactly LEADER_TTL old counts as stale', () => {
   expect(claimLeader({ id: 'b', beat: 0 }, 'a', LEADER_TTL)).toEqual({ id: 'a', beat: LEADER_TTL })
+})
+
+test('pets show their age and have a birthday every 30 days', () => {
+  const day = 86400000
+  const cat = adopt(emptyWorld(0), 'cat', 0).pets[0]!
+  expect([ageLabel(cat, 0), ageLabel(cat, 11 * day + 5), ageLabel(cat, 29 * day)]).toEqual(['0 天', '11 天', '29 天'])
+  expect([ageLabel(cat, 30 * day), ageLabel(cat, 95 * day)]).toEqual(['1 個月', '3 個月'])
+  expect([isBirthday(cat, 29 * day), isBirthday(cat, 30 * day + 3600000), isBirthday(cat, 31 * day), isBirthday(cat, 60 * day)]).toEqual([false, true, false, true])
+  expect(ageMonths(cat, 61 * day)).toBe(2)
+
+  // The tick that crosses day 30 logs the birthday at the anniversary itself.
+  const w = { ...adopt(emptyWorld(0), 'cat', 0), lastTick: 30 * day - 60000 }
+  const after = decay(w, 30 * day)
+  expect(after.events.at(-1)).toEqual({ at: 30 * day, text: '咪咪 滿 1 個月了！' })
+  expect(decay(after, 30 * day + 60000).events.filter(e => e.text.includes('個月')).length).toBe(1)
+  expect(absenceSummary(after.events, 30 * day - 1)).toContain('咪咪 滿 1 個月')
+
+  // The birthday bubble shows on an idle pet and keeps the art width.
+  const bday = sprite({ ...cat, heartsUntil: 0 }, 30 * day + 1000, 0)
+  expect(bday[0]).toContain('bday!')
+  for (const line of bday) expect(line.length).toBe(ART_WIDTH)
+  expect(sprite({ ...cat, heartsUntil: 0 }, 31 * day, 0)[0]).not.toContain('bday!')
 })

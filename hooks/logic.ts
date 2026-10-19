@@ -34,11 +34,13 @@ export function absenceSummary(events: PetEvent[], since: number): string {
   const count = (...marks: string[]) => after.filter(e => marks.some(m => e.text.includes(m))).length
   const fed = count('自己去吃飯'), napped = count('自己去睡覺'), met = count('玩在一起', '拍了', '互相嗅嗅')
   const grown = after.filter(e => e.text.endsWith(' 長大了！')).map(e => e.text.slice(0, -' 長大了！'.length))
+  const birthdays = after.filter(e => / 滿 \d+ 個月了！$/.test(e.text)).map(e => e.text.replace(/了！$/, ''))
   const parts = [
     fed > 0 ? `自己吃了 ${fed} 次飯` : '',
     napped > 0 ? `自己睡了 ${napped} 次` : '',
     met > 0 ? `互動 ${met} 次` : '',
     grown.length > 0 ? `${grown.join('、')} 長大了` : '',
+    ...birthdays,
   ].filter(Boolean)
   return parts.length > 0 ? `你不在的時候：${parts.join('、')}` : ''
 }
@@ -71,6 +73,29 @@ export function isGrown(p: Pet, now: number): boolean {
 export function stageName(p: Pet, now: number): string {
   if (p.kind === 'cat') return isGrown(p, now) ? '貓' : '幼貓'
   return isGrown(p, now) ? '狗' : '小狗'
+}
+
+const DAY = 86400000
+const MONTH_DAYS = 30
+
+export function ageDays(p: Pet, now: number): number {
+  return p.bornAt === undefined ? 0 : Math.max(0, Math.floor((now - p.bornAt) / DAY))
+}
+
+/** Whole 30-day months lived; each one is a birthday. */
+export function ageMonths(p: Pet, now: number): number {
+  return Math.floor(ageDays(p, now) / MONTH_DAYS)
+}
+
+export function ageLabel(p: Pet, now: number): string {
+  const days = ageDays(p, now)
+  return days < MONTH_DAYS ? `${days} 天` : `${Math.floor(days / MONTH_DAYS)} 個月`
+}
+
+/** The whole day of each 30-day anniversary. */
+export function isBirthday(p: Pet, now: number): boolean {
+  const days = ageDays(p, now)
+  return days >= MONTH_DAYS && days % MONTH_DAYS === 0
 }
 
 /**
@@ -133,6 +158,10 @@ export function decay(world: World, now: number): World {
   }
   const lastTick = start + minutes * 60000
   for (const p of pets) if (!isGrown(p, world.lastTick) && isGrown(p, lastTick)) out = record(out, lastTick, `${p.name} 長大了！`)
+  for (const p of pets) {
+    const months = ageMonths(p, lastTick)
+    if (months > ageMonths(p, world.lastTick)) out = record(out, p.bornAt! + months * MONTH_DAYS * DAY, `${p.name} 滿 ${months} 個月了！`)
+  }
   return { ...out, pets, lastTick }
 }
 
@@ -587,6 +616,7 @@ export function sprite(p: Pet, now: number, frame: number, right = true, resting
   // A sad pet says what it misses, between sighs.
   if (m === 'sad') lines[0] = (lines[0] ?? '').replace(/\s*$/, '') + (frame % 4 < 2 ? '  ' + need(p) : '  ...')
   if (reacting && overlay.bubble !== '') lines[0] = (lines[0] ?? '').replace(/\s*$/, '') + '  ' + overlay.bubble
+  else if ((m === 'idle' || m === 'play') && isBirthday(p, now)) lines[0] = (lines[0] ?? '').replace(/\s*$/, '') + '  bday!'
   if (m === 'eat') lines[4] = lines[4].padEnd(15) + (frame % 2 === 0 ? '\\_/' : '\\~/')
   // A carried toy sits in the mouth (the snout's row), so it moves and turns with the pet.
   const toy = m === 'play' ? TOYS[p.kind][toyOf(p)] : undefined

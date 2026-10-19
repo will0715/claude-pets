@@ -3,7 +3,7 @@ import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
 import type { Leader, Reaction, World } from '../types'
 import type { Encounter, Walker } from './logic'
-import { absenceSummary, act, adopt, formatEvent, merge, parseCommand, recentEvents, rename, USAGE, ART_WIDTH, bar, cycle, befriend, cheer, claimLeader, decay, emptyWorld, encounterOverlay, fit, isTestCommand, meet, MEET_COOLDOWN, migrate, stageName, newWalker, NO_REACTION, overlayFor, react, release, sprite, stepWalker, toyLine } from './logic'
+import { absenceSummary, act, adopt, formatEvent, merge, parseCommand, recentEvents, rename, USAGE, ART_WIDTH, bar, cycle, befriend, cheer, claimLeader, decay, emptyWorld, encounterOverlay, fit, isTestCommand, meet, MEET_COOLDOWN, migrate, stageName, ageLabel, newWalker, NO_REACTION, overlayFor, react, release, sprite, stepWalker, toyLine } from './logic'
 
 const PANE = 'pets'
 const STORE_KEY = 'world'
@@ -68,7 +68,7 @@ async function petsView($: EngineInterface, e: RenderInput<'Pane'>, bodyColumns:
             <Box flexDirection="column">
               <Text bold={isSel} dimColor={!isSel} wrap="truncate-end">
                 {isSel ? '> ' : '  '}
-                {p.name}（{stageName(p, now)}）
+                {p.name}（{stageName(p, now)}，{ageLabel(p, now)}）
               </Text>
               {lines.map(line => (
                 <Text wrap="truncate-end">{line}</Text>
