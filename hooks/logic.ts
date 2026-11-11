@@ -165,6 +165,9 @@ export function isNight(at: number): boolean {
  * A sleeping pet cannot eat, so before a nap it eats if it would otherwise wake
  * hungry. Returns the pet and a note for each thing it did, in order.
  */
+/** A pet feeding itself eats up to here, so it is hungry about once an hour, not every half hour. */
+export const SELF_MEAL = 90
+
 export function live(p: Pet, t: number): { pet: Pet; notes: string[] } {
   if (p.sleepingUntil > t) return { pet: p, notes: [] }
   const { napExtra, fullDrop } = TRAITS[trait(p)]
@@ -173,7 +176,7 @@ export function live(p: Pet, t: number): { pet: Pet; notes: string[] } {
   let pet = p
   const notes: string[] = []
   if (p.full < enough) {
-    pet = { ...pet, full: clamp(Math.max(p.full + 30, enough)), eatingUntil: t + 3000 }
+    pet = { ...pet, full: clamp(Math.max(SELF_MEAL, enough)), eatingUntil: t + 3000 }
     notes.push(`${p.name} 肚子餓，自己去吃飯了`)
   }
   if (nap > 0) {

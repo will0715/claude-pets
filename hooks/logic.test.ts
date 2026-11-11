@@ -40,10 +40,14 @@ test('stats decay over time and cap at 12h', () => {
 test('pets eat and nap on their own', () => {
   const min = 60000
   let w = alone('cat', 'active')
-  // full 80 drops 1 a minute: below 25 after 56 minutes, then the cat eats.
+  // full 80 drops 1 a minute: below 25 after 56 minutes, then the cat eats its fill.
   w = decay(w, NOON + 56 * min)
-  expect(w.pets[0]?.full).toBe(54)
+  expect(w.pets[0]?.full).toBe(90)
   expect(w.note).toBe('咪咪 肚子餓，自己去吃飯了')
+  // From 90 the next meal is 66 minutes away, not half an hour.
+  const meals = (to: number) => decay(w, NOON + to * min).events.filter(e => e.text.includes('自己去吃飯')).length
+  expect(meals(56 + 65)).toBe(1)
+  expect(meals(56 + 66)).toBe(2)
 
   // energy 80 drops 1 a minute: below 20 after 61 minutes, then a 10 minute nap.
   w = decay(alone('dog', 'active'), NOON + 61 * min)
